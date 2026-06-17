@@ -1,0 +1,13 @@
+dataset_index: 24
+
+train:
+
+  - datafolder_name: DroneVehicle/train/day
+
+val:
+
+  - datafolder_name: DroneVehicle/test/day
+
+test:
+
+  - datafolder_name: DroneVehicle/test/day

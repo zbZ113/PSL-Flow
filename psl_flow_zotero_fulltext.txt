@@ -1,0 +1,209 @@
+PSL-Flow: Physics-Structured Latent Flow Matching
+for Aerial Visible-to-Infrared Image Translation
+Leping Lin, Zibin Zheng, and Ning Ouyang
+Abstract—Aerial visible-to-infrared (V2IR) image translation provides scalable data support for nighttime remote sensing. However, existing methods predominantly learn cross-modal mappings within pixel or generic latent spaces, where physical information acts merely as an auxiliary training constraint. This limitation hinders physical cues from continuously participating in thermal structure generation during inference. In this letter, we propose PSL-Flow, a novel framework for aerial V2IR image generation via conditional flow matching within a physicsstructured latent space. PSL-Flow shifts the generative objective from direct pixel mapping to physical quantity distribution modeling, enabling physical information to serve as intrinsic generative variables. Specifically, physical quantities including temperature are estimated from real infrared images to construct an intermediate representation endowed with thermal imaging semantics. Subsequently, the physical backbone and local residuals are jointly encoded into a physics-structured latent space, transforming the objective from pixel mapping to thermal state modeling. Ultimately, a continuous generation process driven by visible conditions is learned within this latent space, and infrared images are reconstructed through the synergistic decoding of the physical backbone and boundary residuals. Experimental results demonstrate that the proposed method achieves stable advantages across multiple aerial datasets.
+Index Terms—Aerial visible-to-infrared image translation, physics-structured latent space, flow matching, thermal state modeling
+I. INTRODUCTION
+ERIAL infrared (IR) imagery is essential for allweather remote sensing because it provides a stable characterization of thermal radiation. However, the acquisition of paired visible-to-infrared (VIS-IR) samples depends on expensive sensors and precise registration, which hinders large-scale applications. Consequently, aerial visibleto-infrared (V2IR) translation and its associated tasks have become a research direction with clear practical needs [1]-[3]. Early V2IR methods primarily utilized generative adversaryial networks and Transformers to mitigate structural
+This work was supported in part by the National Natural Science Foundation of China under Grant 62001133 and Grant 61661017, and in part by the Project of Guangxi Wireless Broadband Communication and Signal Processing Key Laboratory under Grant GXKL06200114. (Corresponding author: Ning Ouyang.) Leping Lin is with the Guangxi Wireless Broadband Communication and Signal Processing Key Laboratory, Guilin University of Electronic Technology, Guilin, Guangxi 541004, China, and also with the School of Information and Communication, Guilin University of Electronic Technology, Guilin, Guangxi 541004, China. Zibin Zheng and Ning Ouyang are with the School of Information and Communication, Guilin University of Electronic Technology, Guilin, Guangxi 541004, China (e-mail: ynou@guet.edu.cn).
+blurring and the loss of local details [1], [2], [4], [5]. With the development of generative models [6], approaches such as Brownian bridge diffusion [7] and ThermalGen [8] introduced powerful tools including latent diffusion models [9] and scalable interpolant Transformers (SiT) [10]. Although these methods possess efficient distribution transport capabilities, such cross-modal mappings are inherently learned within generic pixel or feature spaces. As a result, they struggle to explicitly characterize the formation of thermal structures, as infrared thermal properties are not formulated as sampleable state variables. To bridge the gap between visual similarity and thermal plausibility, recent studies have introduced physical modeling into infrared generation. Frameworks such as PID [11] and IPLD [12] inject physical constraints through thermodynamic decomposition, demonstrating the positive impact of physical priors on thermal representation. Indeed, explicit modeling of physical information significantly alleviates the ill-posed nature of V2IR mapping. However, in these methods, physical decomposition serves merely as supervision during training or as a conditional enhancement. During the inference process, reverse sampling still originates from generic noise, which means physical information does not continuously participate in the actual generative trajectory. To address this limitation, we propose PSL-Flow, an aerial V2IR framework that shifts the generative objective from direct infrared image regression to the modeling of physical quantity distributions. Specifically, we utilize a TeR-B module to estimate temperature (T), emissivity (e), environmental radiance ( env
+R ), and thermal boundary responses (B) from real infrared images. These factors are then organized into a physics-structured latent space via a PSL-VAE. Finally, SiT is employed to learn a continuous flow-matching process driven by visible light conditions within this latent space [6], [10]. Crucially, by sampling explicitly organized thermal states during the inference stage, PSL-Flow ensures that physical information remains intrinsic to the generative trajectory. The main contributions are as follows: 1) We propose the TeR-B guided PSL-VAE, which transforms infrared image generation from pixel reconstruction to multi-factor physical thermal state modeling. 2) We introduce the PSL-Flow framework, which represents the first attempt to shift the generative objective from infrared image regression to physical quantity distribution modeling. 3) Experiments demonstrate the advantages of the proposed method regarding structural fidelity, perceptual quality, and physical consistency.
+A
+
+
+Fig. 1. Overall architecture of PSL-Flow. TeR-B first learns thermal factors from real infrared images, PSL-VAE then learns a physics-structured latent space with TeR-B frozen, and SiT finally learns visible-conditioned flow matching with both modules frozen. During inference, only the VIS encoder, SiT, and PSLVAE decoder are retained. A visible image is encoded into a conditional latent variable, Gaussian noise is transported to the target physical latent state by SiT, and the decoder reconstructs the infrared image from the physical backbone and boundary-modulated residuals.
+II. METHOD
+The overall framework of the proposed method is illustrated in Fig . 1. For a given GT-IR, the TeR-B module estimates physical factors including T, e, env
+R , and B to construct an intermediate representation endowed with explicit thermal semantics. Subsequently, the PSL-VAE jointly encodes these physical factors and local residuals into a physics-structured latent space, thereby transforming the generative objective from pixel mapping to thermal state modeling. Within this space, the SiT learns a continuous-time vector field that maps a Gaussian prior to the target thermal state. This approach fundamentally redefines the V2IR translation paradigm by ensuring that physical information functions as the underlying organizational mechanism during the inference stage.
+A. TeR-B for Physical Factor Estimation
+Direct cross-modal mapping often overlooks the underlying thermal imaging mechanisms. To address this limitation, we adopt the concept of TeR [11], [12] decomposition to decompose the normalized real infrared heatmap S  (0,1) into intermediate physical factors, which allows for the construction of an approximate physical backbone response: (1 ) ,
+phys env
+S  e T+ − e R (1)
+where e, T, and env
+R denote the pixel-level emissivity, temperature-driven self-radiation, and environmental radiance, respectively, and represents element-wise multiplication. Relying solely on this backbone is insufficient for capturing fine-grained contours. In aerial scenarios, the coupled effects of thermal diffusion and atmospheric attenuation often lead to the degradation of object boundaries. To explicitly compensate for this altitude-induced degradation, we introduce a thermal boundary response B inspired by the heat conduction effect [13]:
+q = −kT , (2)
+where k represents thermal conductivity and T denotes the temperature gradient. We predict the boundary response through an auxiliary branch, where the response is defined based on the raw output Bh as: ( ) [0,1],
+h
+B = B B  (3)
+with () representing the Sigmoid activation function. The TeR-B module is trained via a self-supervised paradigm. First, a pixel-level reconstruction loss is employed to constrain the radiance magnitude and structural consistency of the backbone:
+1
+|| || ,
+TeR phys
+= S − S (4)
+Second, a normalized boundary prior is constructed using the Sobel magnitude of the input: Normalize(Sobel( )),
+Bgt = S (5)
+A boundary supervision loss is then defined to isolate regions characterized by sharp thermal structural variations: BCE( , ),
+B gt
+= B B (6)
+This ensures that B focuses on areas with abrupt thermal changes. Consequently, the total training objective for the TeR-B module is formulated as:
+TeR-B TeR B
+= +  . (7)
+Through this process, a stable intermediate representation with thermal imaging semantics is obtained, providing an explicit thermal structural prior for subsequent latent space modeling.
+B. Physics-Structured Latent space (PSL-VAE)
+Although the TeR-B module effectively reconstructs the thermal backbone, it inevitably smooths out high-frequency local details. In aerial scenarios, fine-grained edges, local thermal textures, and non-smooth residuals govern the sharpness of target boundaries alongside the naturalness of background thermal stratification. To address this, we define a residual compensation term:
+Te
+Training
+Inference
+: VIS Image ncoder
+: oncatenation eration
+PSL VA ecoder
+: Tunable Parameters : Fro en Parameters
+Te : Physical Factor stimation
+Timeste
+
+
+,
+phys
+ = x − S (8)
+This term is organized into a five-channel physical factor stack along with T, e, env
+R , and B. Because T, e, env
+R , B, and  have substantially different physical meanings and statistical distributions, direct concatenation leads to unstable latent transport; therefore, each channel is normalized before constructing the structured stack:
+[ , , , , ], (0,1),
+env
+f = T e R B  f  (9)
+This operation maps the variables into a unified interval [-1,1]:
+f = 2f − I . (10) Building upon this foundation, we construct the PSL-VAE using a standard AutoencoderKL [9] architecture to encode the normalized stack into a structured physical latent variable. Let  and  denote the encoder and decoder parameters, respectively. The encoding distribution is expressed as:
+2
+( ) ( ( ), ( )),
+phys
+qz
+ 
+∣f =  f  f (11)
+where phys
+z represents the structured physical latent variable. The reparameterization trick is employed for sampling during the training phase: ( ) ( ) , ~ (0, ),
+phys
+zI
+
+=  f + f (12)
+During the decoding process, ˆ ˆ ˆ ˆ ˆ
+ˆ
+[,, , , ]
+env
+f = T e R B  is mapped back to the original interval to recover physical factors and residuals, reconstruct-ing the final output: ˆ ˆˆ
+clip( ( ) , [0,1]),
+phys
+y = S + G B  (13)
+where G() denotes a residual gating function controlled by the boundary map. Unlike generic variational autoencoders, the latent space optimized by PSL-VAE explicitly preserves physical semantics, thermal backbone topology, and local detail compensation capabilities. Accordingly, the reconstruction loss for each factor is defined as:
+11 1
+1 1,
+ˆˆ
+ˆ
+ˆˆ
+env env
+TT ee R R
+BB
+= − +−+ −
++ − + −
+f ‖ ‖‖ ‖‖ ‖
+‖ ‖ ‖ ‖ (14)
+Additionally, an explicit constraint is imposed on the decoded physical backbone thermal response:
+1
+|| ˆ || ,
+phys phys phys
+= S − S (15)
+An LPIPS perceptual loss is incorporated to prevent the oversmoothing degradation often induced by relying strictly on pixel-level optimization: ( , ),
+perc = LPIPS y x (16)
+Combined with the Kullback-Leibler (KL) divergence for latent space regularization, the overall training objective is formulated as:
+PSL VAE phys phys perc perc KL KL
+  
+−= + + +
+f f . (17)
+Through this processing stage, the infrared generation objective is successfully reformulated into a latent state modeling problem endowed with thermal structural semantics.
+C. Flow Matching in PSL-VAE(PSL-Flow)
+Once the physics-structured latent space is established, the generative objective involves transporting a prior distribution toward the target thermal state under the guidance of visible
+conditions. Specifically, a pre-trained VIS KL-VAE [9] encodes the visible image to extract conditional latent variables: ( ),
+vis vis vis
+z = E x (18)
+By concatenating zvis with the time-dependent state zt , we obtain: [ ; ],
+t t vis
+z = z z (19)
+The model subsequently learns a continuous-time transport process for the thermal state, effectively modeling the conditional distribution ( ir∣ vis )
+p x x . Given the target physical latent variable phys
+z and standard Gaussian noise , we define the time-dependent interpolated state as: , ~ (0, ),
+t t phys t
+z = z + I (20)
+The scaling schedule functions, t and t , satisfy the boundary conditions 0 = 1 , 0 = 0 , 1 = 0 , and 1 = 1 . The corresponding target velocity field is derived as: ( ,) ,
+t t phys t
+v z t z 
+ = + (21)
+Consequently, the SiT is optimized to predict the conditional velocity field ( , , )
+t vis
+v z tz
+ by minimizing the flow-matching loss:
+2 ,, 2
+‖ ( , , ) ( , )‖
+phys
+flow z t t vis t
+v z tz v z t
+
+
+
+=−
+  . (22)
+This formulation elevates the learning objective of SiT from a generic infrared latent space to an explicit physics-structured latent space. During the inference stage, the generative process originates from pure Gaussian noise. An ordinary differential equation (ODE) solver within the trained SiT dynamically samples the predicted physical latent states. The PSL-VAE decoder then maps these states back to the physical backbone and boundary-modulated residuals to synergistically reconstruct the final infrared image. Crucially, the explicit thermal structural priors embedded by the TeR-B module during training are inherently inherited during inference. This inheritance mechanism, governed by latent space organization and flow-matching transport, achieves our primary objective of executing visible-to-infrared translation as a process of sampling physical states.
+III. EXPERIMENT RESULTS AND ANALYSIS
+A. Experimental Setup
+The proposed PSL-Flow is evaluated on the AVIID [14], CART [15], and DRONEVEHICLE [16] datasets. To ensure spatial alignment, all images are resized to 256 256 . Performance is quantified using PSNR, SSIM [17], LPIPS [18], and FID [19]. The model is implemented via PyTorch 2.0.1 and trained on an NVIDIA Tesla A100 GPU using the AdamW optimizer with a batch size of 16. During the inference stage, we employ dopri5 as the ODE solver with a sampling budget of 50 steps. Baseline comparisons include StegoGAN [17], IRFormer [5], DR-AVIT [4], USTNet [1], and PID [11].
+B. Comparison with Existing Methods
+Quantitative results in Table I and II highlight the significant advantages of PSL-Flow in terms of SSIM and LPIPS, achieving state-of-the-art performance across all evaluation metrics on the AVIID dataset. Qualitative visualizations
+
+
+Fig. 2. Qualitative comparison on the AVIID, CART, and DRONEVEHICLE datasets. PSL-Flow achieves stable performance across various scenarios.
+TABLE I
+QUANTITATIVE RESULTS ON THE AVIID AND CART DATASETS. HIGHLIGHT THE BEST PART IN BOLD.
+Method Venue/Year Category CART AVIID
+PSNR↑ SSIM↑ LPIPS↓ FID↓ PSNR↑ SSIM↑ LPIPS↓ FID↓
+StegoGAN [17] CVPR 2024 GAN 11.98 36.05% 45.95% 150.55 16.82 47.30% 28.18% 69.58 IRFormer [5] IJCNN 2024 ViT 17.12 54.61% 61.21% 289.87 19.23 60.12% 44.21% 139.15 DR-AVIT [4] TGRS 2024 GAN 14.70 44.87% 51.28% 218.80 16.52 46.33% 39.53% 152.93 USTNet [1] TGRS 2025 GAN 12.16 40.01% 46.10% 138.55 18.85 57.36% 23.53% 54.21 PID [11] PR 2026 Diffusion 9.31 19.90% 39.42% 226.36 22.03 58.93% 13.30% 52.69 Ours - - Diffusion 14.87 55.89% 34.72% 125.13 23.73 77.04% 12.90% 30.67
+TABLE II
+QUANTITATIVE RESULTS ON THE DRONEVEHICLE DATASET. HIGHLIGHT THE BEST PART IN BOLD.
+Method Venue/Year Category DRONEVEHICLE-DAY DRONEVEHICLE-NIGHT
+PSNR↑ SSIM LPIPS↓ FID↓ PSNR↑ SSIM↑ LPIPS↓ FID↓
+StegoGAN [17] CVPR 2024 GAN 12.85 17.12% 53.34% 158.73 13.32 13.00% 64.25% 140.89 IRFormer [5] IJCNN 2024 ViT 15.41 51.54% 31.59% 97.64 15.57 51.31% 41.70% 128.27 DR-AVIT [4] TGRS 2024 GAN 13.89 46.86% 24.27% 46.40 14.44 44.95% 31.20% 37.65 USTNet [1] TGRS 2025 GAN 13.32 45.84% 27.31% 34.14 13.78 44.27% 33.82% 20.89 PID [11] PR 2026 Diffusion 13.97 34.07% 29.05% 81.90 14.06 35.59% 33.26% 53.91 Ours - - Diffusion 16.08 53.54% 21.94% 40.22 16.40 53.62% 24.79% 29.98
+presented in Fig . 2 corroborate these findings, revealing sharper boundaries and more realistic thermal stratification. These results demonstrate that while maintaining competitive global distribution alignment, the proposed method exhibits superior local structural fidelity.
+C. Ablation Study
+As shown in Table III replacing the standard KL-VAE with the PSL-VAE yields substantial improvements in SSIM and LPIPS, confirming its suitability for thermal state representa
+TABLE III
+VAE RECONSTRUCTION RESULTS ON AVIID AND DRONEVEHICLE
+Data Category PSNR↑ SSIM↑ LPIPS↓ AVIID KL-VAE 32.53 91.03% 5.83%
+PSL-VAE 34.93 95.37% 5.28% DRONE VEHICLE-DAY
+KL-VAE 26.36 89.65% 6.13% PSL-VAE 28.74 91.35% 5.86% DRONE VEHICLE-NIGHT
+KL-VAE 30.56 90.92% 5.67% PSL-VAE 31.41 92.82% 5.20%
+tion. Although predicting a multi-channel physical stack increases generative complexity, evidence in Table IV indicates that extending the training duration effectively mitigates this issue, resulting in superior physical fidelity. Furthermore, Table V suggests that the combination of residual compensation and boundary gating successfully restricts detail optimization to structure-sensitive regions.
+TABLE IV
+PSL-VAE VS. KL-VAE UNDER THE SAME SIT BACKBONE
+Data Category PSNR↑ SSIM↑ LPIPS↓
+AVIID
+SiT(step:45K) 24.99 76.44% 11.87% Ours(step:45K) 23.21 73.39% 15.14% Ours(step:75K) 23.73 77.04% 12.90%
+DRONE VEHICLE-DAY
+SiT(step:70K) 15.86 50.50% 24.26% Ours(step:70K) 15.89 52.26% 22.97% Ours(step:100k) 16.08 53.54% 21.94%
+DRONE VEHICLE-NIGHT
+SiT(step:90K) 17.17 52.42% 26.17% Ours(step:90K) 16.16 52.24% 25.91%
+Ours(step:120K) 16.40 53.62% 24.79%
+A T AVII V IL
+VIS I T Stego A I Former AVIT ST et P I urs
+
+
+TABLE V
+ABLATION OF BOUNDARY GATING AND RESIDUAL COMPENSATION
+Data Category PSNR↑ SSIM↑ LPIPS↓
+AVIID
+w/o B&Δ 23.70 77.03% 12.92% w/Δ 23.68 76.80% 13.07% w/B&Δ 23.73 77.04% 12.90%
+DRONE VEHICLE-DAY
+w/o B&Δ 16.02 53.41% 21.94% w/Δ 16.06 53.46% 21.98% w/B&Δ 16.08 53.54% 21.94%
+DRONE VEHICLE-NIGHT
+w/o B&Δ 16.40 53.62% 24.81% w/Δ 16.38 53.50% 24.91% w/B&Δ 16.40 53.62% 24.79%
+D. Physical Consistency Analysis
+To explicitly validate the preservation of physical mechanisms, a frozen TeR-B module is utilized to extract proxy physical factors from both the generated and GT-IR. The results in Fig . 3 show that the normalized mean absolute error is strictly maintained below 0.05. This confirms that our explicit state modeling preserves meaningful thermophysical properties rather than simply imitating textures. For intuitive demonstration, HSV pseudo-color synthesis is applied to highlight the alignment within these factor spaces.
+Fig. 3. Visual analysis of physics-guided consistency. The structures generated by PSL-Flow preserve the rationality of thermal structures.
+IV. CONCLUSION
+This letter proposes a PSL-Flow, which reformulates aerial V2IR translation from direct image synthesis into explicit thermal state modeling. By executing visible-conditioned flow matching within a physics-structured latent space, the framework fundamentally elevates physical guidance from a training-time supervision signal to an active sampling state during inference, offering a new paradigm for infrared image generation. Extensive experiments across multiple datasets confirm that this paradigm significantly enhances structural fidelity, perceptual quality, and physical consistency compared with existing methods. Future work will explore more advanced distribution alignment strategies and direct physical validation to further investigate this generative paradigm based on physical sampling.
+REFERENCES
+[1] Z. an, X. hen, Z. Ye, Y. Su, L. Wang, and S. Mei, “ ST et: A -Net Swin Transformer network for aerial visible-to-infrared image translation,” IEEE Trans. Geosci. Remote Sens., vol. 63, pp. 1–14, 2025. [2] . Li, . Wang, . Zhao, and W. u, “ ross-modal visible-to-infrared image translation in remote sensing guided by thermal features,” IEEE Trans. Geosci. Remote Sens., vol. 63, pp. 1–16, 2025.
+[3] M. Li, L. Zhao, . Wang, X. Song, and X. Wei, “Patch grid-based quality assessment for aerial visible-to-infrared image translation,” IEEE Geosci. Remote Sens. Lett., vol. 22, pp. 1–5, 2025.
+[4] Z. an, S. Zhang, Y. Su, X. hen, and S. Mei, “ -AVIT: Toward diverse and realistic aerial visible-to-infrared image translation,” IEEE Trans. Geosci. Remote Sens., vol. 62, pp. 1–13, 2024.
+[5] Y. hen, P. hen, X. Zhou, Y. Lei, Z. Zhou, and M. Li, “Im licit multispectral transformer: An lightweight and effective visible-to-infrared image translation model,” in Proc. Int. Joint Conf. Neural Netw. (IJCNN), Jun. 2024, pp. 1–8. [6] Y. Lipman, R. T. Q. Chen, H. Ben- amu, M. ickel, and M. Le, “Flow matching for generative modeling,” in Proc. Int. Conf. Learn. Represent. (ICLR), 2023.
+[7] X. Wang et al., “ to infrared image translation based on diffusion bridges under aerial ers ective,” Remote Sens., vol. 17, no. 22, Art. no. 3703, Nov. 2025. [8] J. Xiao, . ayak, . Zhang, . Tortei, and . Loianno, “Thermal en: Style-disentangled flow-based generative models for RGB-to-thermal image translation,” 2 25, arXiv:25 9.24878. [9] . ombach, A. lattmann, . Loren , P. sser, and . mmer, “ ighresolution image synthesis with latent diffusion models,” in Proc. IEEE/CVF Conf. Comput. Vis. Pattern Recognit. (CVPR), Jun. 2022, pp. 10684–10695. [10] N. Ma, M. Goldstein, M. S. Albergo, N. M. Boffi, E. Vanden-Eijnden, and S. Xie, “SiT: x loring flow and diffusion-based generative models with scalable inter olant transformers,” 2 24, arXiv:24 1. 874 . [11] F. Mao et al., “PI : Physics-informed diffusion model for infrared image generation,” Pattern Recognit., vol. 169, Art. no. 111816, Jan. 2026. [12] . Yang et al., “ ealistic infrared image generation based on hysicsguided latent diffusion,” Eng. Appl. Artif. Intell., vol. 167, Art. no. 113752, Mar. 2026. [13] Q. Zhang, Q. Liu, . Yuan, X. Li, and Y. Liu, “PPIFuse: Physical riors injected infrared and visible image fusion,” IEEE Trans. Circuits Syst. Video Technol., vol. 36, no. 4, pp. 4521–4535, Apr. 2026. [14] Z. an, Z. Zhang, S. Zhang, . Zhang, and S. Mei, “Aerial visible-toinfrared image translation: ataset, evaluation, and baseline,” J. Remote Sens., vol. 3, Art. no. 0096, Nov. 2023. [15] . Lee et al., “ altech aerial -thermal dataset in the wild,” 2 24, arXiv:2403.08997. [16] Y. Sun, . ao, P. Zhu, and Q. u, “ rone-based RGB-infrared crossmodality vehicle detection via uncertainty-aware learning,” IEEE Trans. Circuits Syst. Video Technol., vol. 32, no. 10, pp. 6700–6713, Oct. 2022. [17] S. Wu et al., “Stego A : Leveraging steganogra hy for non-bijective image-to-image translation,” in Proc. IEEE/CVF Conf. Comput. Vis. Pattern Recognit. (CVPR), Jun. 2024, pp. 7922–7931.
+[18] Z. Wang, A. . ovik, . . Sheikh, and . P. Simoncelli, “Image uality assessment: From error visibility to structural similarity,” IEEE Trans. Image Process., vol. 13, no. 4, pp. 600–612, Apr. 2004. [19] . Zhang, P. Isola, A. A. fros, . Shechtman, and . Wang, “The unreasonable effectiveness of dee features as a erce tual metric,” in Proc. IEEE/CVF Conf. Comput. Vis. Pattern Recognit. (CVPR), Jun. 2018, pp. 586–595. [20] M. Heusel, H. Ramsauer, T. Unterthiner, B. Nessler, and S. Hochreiter, “ A s trained by a two time-scale update rule converge to a local Nash e uilibrium,” in Proc. Adv. Neural Inf. Process. Syst. (NeurIPS), 2017, pp. 6626–6637. [21] C. Sui, Z. Xu, Y. Meng, H. Wang, B. Zhang, and G. Vivone, “ ycleMamba: ycle-consistent learning for aerial visible-to-infrared image translation,” IEEE Trans. Geosci. Remote Sens., vol. 64, pp. 1–18, 2026. [22] X. hen, Z. Liu, Z. an, M. Ma, and J. Zhao, “MSF : Multiscale feature decomposition for cross-modality visible-to-infrared drone image translation,” IEEE Internet Things J., vol. 12, no. 13, pp. 25951–25965, Jul. 2025. [23] F. ao et al., “ eat-assisted detection and ranging,” Nature, vol. 619, no. 7971, pp. 743–748, Jul. 2023. [24] Z. Su, M. Shi, T. ao, J. ao, . Li, and Q. Yao, “Physics-informed diffusion for visible-to-infrared domain translation of pavement crack images,” Autom. Constr., vol. 183, Art. no. 106780, Mar. 2026. [25] J. hen, S. Shu, . Meng, and X. ai, “Ther et: Thermal segmentation network harnessing hysical ro erties,” IEEE Trans. Pattern Anal. Mach. Intell., vol. 47, no. 12, pp. 11768–11784, Dec. 2025. [26] U. Utkarsh, P. Cai, A. Edelman, R. Gomez-Bombarelli, and C. V. ackauckas, “Physics-constrained flow matching: Sampling generative models with hard constraints,” 2 25, arXiv:25 6. 4171.
+MA urs T
+I SV
+. . 41 . 149 . 289 . 2 7

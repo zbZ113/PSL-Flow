@@ -1,0 +1,51 @@
+run:
+  output_dir: outputs/phys_consistency
+  device: auto
+  batch_size: 8
+  max_samples: -1
+  num_vis: 8
+  hot_percent: 1.0
+  rank_size: 64
+  save_factor_maps_all: true
+
+teacher:
+  smp_model: Unet
+  smp_encoder: resnet18
+  smp_encoder_weights: null
+  vnums: 4
+  erme_kernel: 5
+  lambda_env_init: 0.1
+  a_low_range: [0.8, 1.2]
+
+datasets:
+  - name: AVIID
+    pair_dir: ""
+    gt_dir: ""
+    pred_dir: ""
+    input_dir: ""
+    match_by: stem
+    teacher_ckpt: logs/physics/AVIID/teacher/states/best.pth
+
+  - name: CART
+    pair_dir: ""
+    gt_dir: ""
+    pred_dir: ""
+    input_dir: ""
+    match_by: stem
+    teacher_ckpt: logs/physics/CART/teacher/states/best.pth
+
+  - name: DroneVehicle_day
+    pair_dir: ""
+    gt_dir: ""
+    pred_dir: ""
+    input_dir: ""
+    match_by: stem
+    teacher_ckpt: logs/physics/DroneVehicle_day/teacher/states/best.pth
+
+  - name: DroneVehicle_night
+    pair_dir: ""
+    gt_dir: ""
+    pred_dir: ""
+    input_dir: ""
+    match_by: stem
+    teacher_ckpt: logs/physics/DroneVehicle_night/teacher/states/best.pth
