@@ -1,0 +1,7 @@
+dataset_index: 25
+train:
+  - datafolder_name: DroneVehicle/train/night
+val:
+  - datafolder_name: DroneVehicle/test/night
+test:
+  - datafolder_name: DroneVehicle/test/night
