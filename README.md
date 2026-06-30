@@ -1,135 +1,123 @@
-# PSL-Flow: Physics-Structured Latent Flow Matching for Aerial Visible-to-Infrared Image Translation
+# PSL-Flow
 
-This repository contains the implementation used for **PSL-Flow**, an aerial visible-to-infrared (V2IR) image translation framework that learns conditional flow matching in a physics-structured latent space.
+Clean paper-facing implementation of Physics-Structured Latent Flow Matching for visible-to-infrared image translation.
 
-The code keeps only the routes needed for the paper:
+The public code contains four routes only:
 
-- **PSL-Flow main route:** `TeR-B Net -> PSL-VAE -> conditional SiT`
-- **Tokenizer ablation:** `KLVAE -> conditional SiT`
+- TeR-B teacher
+- PSL-VAE
+- PSL-Flow / SiT
+- KLVAE-SiT ablation
 
-Other historical generation routes are not part of this migrated workspace.
-
-## Method
-
-PSL-Flow reformulates aerial V2IR generation from direct infrared image regression into thermal state modeling. It has three stages:
-
-1. **TeR-B Net** estimates physical factors from real infrared images: temperature proxy `T`, emissivity `e`, environmental radiance `R_env`, attenuation/response `A`, and boundary response `B`.
-2. **PSL-VAE** encodes the TeR-B factor stack and local residual compensation into a physics-structured latent state.
-3. **Conditional SiT** learns a visible-conditioned continuous transport from Gaussian noise to the PSL-VAE thermal latent state, then reconstructs infrared images through the PSL-VAE decoder.
-
-During inference, TeR-B Net is not on the default generation path. The visible image is encoded as condition, SiT samples the target physical latent state, and PSL-VAE decodes the thermal image.
-
-## Setup
+## Install
 
 ```bash
-conda env create -f env.yml
-conda activate PSL_Flow
-pip install -r requirements-physics.txt
+conda env create -f environment.yml
+conda activate psl-flow
 ```
 
-Expected external assets are not stored in this repo:
-
-- datasets under `datasets_preprocess/`
-- TeR-B checkpoints under `checkpoints/physics/<DATASET>/terb_net/`
-- PSL-VAE checkpoints under `checkpoints/psl_vae/<DATASET>/`
-- KLVAE checkpoints under `checkpoints/klvae/`
-- PSL-Flow SiT checkpoints under `logs/psl_flow/<DATASET>/checkpoints/`
-
-## Train TeR-B Net
+or install into an existing CUDA-ready PyTorch environment:
 
 ```bash
-DATASET_NAME=AVIID bash shell/Physics/train_terb_net_dataset.sh
-DATASET_NAME=CART bash shell/Physics/train_terb_net_dataset.sh
-DATASET_NAME=DroneVehicle_day bash shell/Physics/train_terb_net_dataset.sh
-DATASET_NAME=DroneVehicle_night bash shell/Physics/train_terb_net_dataset.sh
+pip install -r requirements.txt
 ```
 
-The dataset script writes logs to `logs/physics/<DATASET>/terb_net` and checkpoints to `checkpoints/physics/<DATASET>/terb_net`.
+## Data
 
-Dataset shortcut scripts such as `shell/Physics/aviid_terb_net.sh` and `shell/Physics/cart_terb_net.sh` are also provided.
+The default data root is `datasets_preprocess/`. Each split is a WebDataset directory:
 
-## Train PSL-VAE
+```text
+datasets_preprocess/
+  AVIID/
+    train/
+      dataset-000000.tar
+      metadata.json
+    test/
+      dataset-000000.tar
+      metadata.json
+```
+
+Each tar sample must contain:
+
+```text
+color.png
+thermal.png
+```
+
+`metadata.json` must contain:
+
+```json
+{"num_samples": 2412}
+```
+
+Supported paper dataset keys are `AVIID`, `CART`, `DroneVehicle_day`, and `DroneVehicle_night`.
+
+## One-Command Workflows
+
+Run the full TeR-B -> PSL-VAE -> PSL-Flow route:
 
 ```bash
-DATASET_NAME=AVIID \
-TERB_NET_CKPT=checkpoints/physics/AVIID/terb_net/teacher_best.pth \
-bash shell/VAE/train_psl_vae_dataset.sh
+bash scripts/run_paper_pipeline.sh --dataset AVIID --route psl_flow
 ```
 
-The base config is `configs/train/ldm/psl_vae_all_256_1st.yml`. The wrapper writes the tokenizer checkpoint to `checkpoints/psl_vae/<DATASET>/checkpoints/last.ckpt`.
-
-Dataset shortcut scripts such as `shell/VAE/aviid_psl_vae.sh` and `shell/VAE/cart_psl_vae.sh` are also provided.
-
-## Train PSL-Flow
+Run the KLVAE-SiT ablation route:
 
 ```bash
-SIT_DATASET=AVIID \
-TERB_NET_CKPT=checkpoints/physics/AVIID/terb_net/teacher_best.pth \
-SIT_VAE_CKPT=auto \
-bash shell/SiT/train_psl_flow_dataset.sh
+bash scripts/run_paper_pipeline.sh --dataset AVIID --route klvae_sit
 ```
 
-The base config is `configs/train/sit_cond/psl_flow_l2_concat.yml`. `SIT_VAE_CKPT=auto` resolves the PSL-VAE checkpoint from `logs/psl_vae` and `checkpoints/psl_vae`.
+The pipeline defaults to GPU 1, batch size 16, no validation during training, checkpoints at 45K and 75K SiT steps, and one final validation at the end. It records elapsed time and peak GPU memory in `summary.csv`.
 
-Dataset shortcut scripts such as `shell/SiT/aviid_sit_train_psl_flow.sh` and `shell/SiT/cart_sit_train_psl_flow.sh` are also provided.
-
-## KLVAE->SiT Ablation
+Useful environment overrides:
 
 ```bash
-SIT_DATASET=AVIID \
-SIT_VAE_CKPT=checkpoints/klvae/checkpoints/last.ckpt \
-bash shell/SiT/train_generic_sit_dataset.sh
+CUDA_VISIBLE_DEVICES_REQUESTED=1
+NVIDIA_SMI_GPU_ID=1
+RGB_VAE_PATH=/root/autodl-fs/sd-vae-ft-ema
+THERMAL_KLVAE_CKPT=/path/to/thermal_klvae.ckpt
+THERMAL_KLVAE_NORMALIZER=1.0
 ```
 
-The base config is `configs/train/sit_cond/generic_sit_l2_concat.yml`. This route keeps the same conditional SiT backbone but uses a generic KLVAE tokenizer instead of PSL-VAE.
+For the PSL-Flow route, `thermal_normalizer` is not fixed in the base config. The pipeline estimates it from the trained PSL-VAE latent statistics and writes a patched run config before SiT training starts.
 
-## Evaluation
+## Configs
 
-Evaluate PSL-Flow:
+Paper configs live in `psl_flow/configs/paper/`:
 
-```bash
-SIT_DATASET=AVIID \
-SIT_CKPT=auto \
-TERB_NET_CKPT=checkpoints/physics/AVIID/terb_net/teacher_best.pth \
-bash shell/SiT/test_psl_flow_dataset.sh
+- `terb_<dataset>.yml`
+- `psl_vae_<dataset>.yml`
+- `psl_flow_<dataset>.yml`
+- `klvae_sit_<dataset>.yml`
+
+Dataset split definitions live in `psl_flow/configs/paper/datasets/`.
+
+## Checkpoints
+
+No checkpoint is bundled with this repository. The pipeline writes new checkpoints under `logs/paper_runs/<dataset>/<route>/<run_id>/artifacts/`.
+
+For `psl_flow`, the next stage automatically consumes the final checkpoint from the previous stage. For `klvae_sit`, provide a trained thermal KL-VAE checkpoint through `THERMAL_KLVAE_CKPT`.
+
+## Validation
+
+Final metrics are written as JSON under:
+
+```text
+logs/paper_runs/<dataset>/<route>/<run_id>/artifacts/metrics/
 ```
 
-Evaluate the KLVAE->SiT ablation:
+The same run directory can be resumed. If complete checkpoints already exist, the pipeline reuses them and continues with the missing validation or next stage.
 
-```bash
-SIT_DATASET=AVIID \
-SIT_CKPT=auto \
-SIT_VAE_CKPT=checkpoints/klvae/checkpoints/last.ckpt \
-bash shell/SiT/test_generic_sit_dataset.sh
+## Citation
+
+```bibtex
+@article{pslflow2026,
+  title = {Physics-Structured Latent Flow Matching for Aerial Visible-to-Infrared Image Translation},
+  author = {Anonymous},
+  journal = {Manuscript under review},
+  year = {2026}
+}
 ```
 
-Run PSL-Flow recomposition ablations:
+## License
 
-```bash
-DATASETS="AVIID CART DroneVehicle_day DroneVehicle_night" \
-PSL_RECOMPOSE_MODES="full delta_only phys_only" \
-bash shell/SiT/eval_psl_flow_ablation_all.sh
-```
-
-Benchmark SiT routes:
-
-```bash
-python scripts/benchmark_sit_routes.py \
-  --ckpt logs/psl_flow/AVIID/checkpoints/last.ckpt \
-  --image path/to/visible.png \
-  --route psl_flow
-```
-
-## Important Files
-
-- `psl_flow.py`: paper-facing Lightning entrypoint exporting `PSLFlow`
-- `models/physics/terb_net.py`: paper-facing TeR-B Net import path
-- `models/psl_vae/`: paper-facing PSL-VAE import path
-- `configs/train/ldm/psl_vae_all_256_1st.yml`: PSL-VAE tokenizer training config
-- `configs/train/sit_cond/psl_flow_l2_concat.yml`: PSL-Flow training config
-- `configs/train/sit_cond/generic_sit_l2_concat.yml`: KLVAE->SiT ablation config
-- `scripts/write_grsl_docx.py`: manuscript-generation script for the PSL-Flow paper draft
-
-## Compatibility Notes
-
-Some internal filenames and aliases from the source workspace are intentionally retained so old checkpoints and config values can still load. New experiments should use `PSLFlow`, `PSL_VAE`, `TeR_B`, `psl_vae`, and `psl_flow` names.
+This repository is released under the MIT License. The bundled SiT transport/network files retain their upstream license in `psl_flow/models/sit/LICENSE`.

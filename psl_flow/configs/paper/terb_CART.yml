@@ -1,0 +1,45 @@
+﻿model:
+  model_arch: terb
+  model_config:
+    smp_model: Unet
+    smp_encoder: resnet18
+    smp_encoder_weights:
+    vnums: 4
+    erme_kernel: 5
+    lambda_env_init: 0.1
+
+datasets:
+  datasets_folder: ./datasets_preprocess
+  dataset_config_root: psl_flow/configs/paper/datasets
+  train_datasets: [CART]
+  val_datasets: [CART]
+  test_datasets: [CART]
+  target_val_dataset: CART
+
+training:
+  num_epochs: 300
+  max_steps: -1
+  num_samples_per_epoch: 2412
+  train_batch_size: 16
+  test_batch_size: 16
+  num_workers: 8
+  train_image_size: [256, 256]
+  image_norm: normal
+  optimizer:
+    name: AdamW
+    lr: 1.0e-4
+    weight_decay: 0.0
+  loss:
+    name: paper_terb
+    config:
+      beta: 0.1
+  mixed_precision: false
+  gradient_accumulation: 1
+  check_val_every_n_epoch: 10
+  limit_val_batches:
+  checkpoint_monitor: val/loss_total
+  checkpoint_mode: min
+  checkpoint_save_top_k: 1
+  disable_logger: false
+  log_every_n_steps: 50
+

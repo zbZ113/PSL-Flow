@@ -1,5 +1,0 @@
-# Physics branch extras for TeR-B Net / PhysCPEN / PhysSur.
-# Keep segmentation-models-pytorch pinned because TeR-B Net uses its
-# encoder/decoder interface directly.
-segmentation-models-pytorch==0.3.4
-PyYAML>=6.0

@@ -1,0 +1,15 @@
+torch
+torchvision
+pytorch-lightning
+diffusers
+segmentation-models-pytorch==0.3.4
+webdataset
+torchdiffeq
+timm
+einops
+numpy
+Pillow
+PyYAML
+requests
+tqdm
+pytest
