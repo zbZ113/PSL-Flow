@@ -436,9 +436,9 @@ log_msg "RGB VAE condition encoder path: ${RGB_VAE_PATH}"
 
 BASE_DIR="psl_flow/configs/experiments"
 if [[ "${ROUTE}" == "psl_flow" ]]; then
-  TERB_BASE_CFG="${BASE_DIR}/terb_${DATASET_NAME}.yml"
-  PSLVAE_BASE_CFG="${BASE_DIR}/psl_vae_${DATASET_NAME}.yml"
-  FLOW_BASE_CFG="${BASE_DIR}/psl_flow_${DATASET_NAME}.yml"
+  TERB_BASE_CFG="${BASE_DIR}/terb/${DATASET_NAME}.yml"
+  PSLVAE_BASE_CFG="${BASE_DIR}/psl_vae/${DATASET_NAME}.yml"
+  FLOW_BASE_CFG="${BASE_DIR}/psl_flow/${DATASET_NAME}.yml"
   PIPE_ROOT="${ARTIFACT_ROOT}/psl_flow"
   TERB_RUN="${PIPE_ROOT}/terb"
   PSLVAE_RUN="${PIPE_ROOT}/psl_vae"
@@ -502,7 +502,7 @@ if [[ "${ROUTE}" == "psl_flow" ]]; then
   fi
   assert_file "${FLOW_STATS_JSON}" "PSL-VAE latent stats"
 else
-  FLOW_BASE_CFG="${BASE_DIR}/klvae_sit_${DATASET_NAME}.yml"
+  FLOW_BASE_CFG="${BASE_DIR}/klvae_sit/${DATASET_NAME}.yml"
   PIPE_ROOT="${ARTIFACT_ROOT}/klvae_sit"
   FLOW_RUN="${PIPE_ROOT}/sit_steps${SIT_STEP_2}"
   FLOW_CFG="${ARTIFACT_ROOT}/configs/klvae_sit_${DATASET_NAME}.yml"

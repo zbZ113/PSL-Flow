@@ -84,10 +84,10 @@ For the PSL-Flow route, `thermal_normalizer` is not fixed in the base config. Th
 
 Experiment configs live in `psl_flow/configs/experiments/`:
 
-- `terb_<dataset>.yml`
-- `psl_vae_<dataset>.yml`
-- `psl_flow_<dataset>.yml`
-- `klvae_sit_<dataset>.yml`
+- `terb/<dataset>.yml`
+- `psl_vae/<dataset>.yml`
+- `psl_flow/<dataset>.yml`
+- `klvae_sit/<dataset>.yml`
 
 Dataset split definitions live in `psl_flow/configs/experiments/datasets/`.
 
