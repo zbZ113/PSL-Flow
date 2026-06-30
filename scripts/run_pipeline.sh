@@ -45,6 +45,7 @@ export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES_REQUESTED:-1}"
 export WANDB_MODE="${WANDB_MODE:-disabled}"
 export WANDB_DISABLED="${WANDB_DISABLED:-true}"
 export TOKENIZERS_PARALLELISM="${TOKENIZERS_PARALLELISM:-false}"
+export DATASETS_PREPROCESS_ROOT="${DATASETS_PREPROCESS_ROOT:-datasets_preprocess}"
 
 NVIDIA_SMI_GPU_ID="${NVIDIA_SMI_GPU_ID:-1}"
 GPU_POLL_INTERVAL_SECONDS="${GPU_POLL_INTERVAL_SECONDS:-1}"
@@ -87,6 +88,41 @@ RGB_VAE_REPO="${RGB_VAE_REPO:-stabilityai/sd-vae-ft-ema}"
 RGB_VAE_LOCAL_FILES_ONLY="${RGB_VAE_LOCAL_FILES_ONLY:-false}"
 THERMAL_KLVAE_CKPT="${THERMAL_KLVAE_CKPT:-}"
 THERMAL_KLVAE_NORMALIZER="${THERMAL_KLVAE_NORMALIZER:-1.0}"
+
+dataset_required_splits() {
+  case "${DATASET_NAME}" in
+    AVIID)
+      printf "%s\n" "AVIID/train" "AVIID/test"
+      ;;
+    CART)
+      printf "%s\n" "CART/train" "CART/val" "CART/test"
+      ;;
+    DroneVehicle_day)
+      printf "%s\n" "DroneVehicle/train/day" "DroneVehicle/test/day"
+      ;;
+    DroneVehicle_night)
+      printf "%s\n" "DroneVehicle/train/night" "DroneVehicle/test/night"
+      ;;
+  esac
+}
+
+assert_dataset_preprocessed() {
+  local missing=0 rel split_dir
+  while IFS= read -r rel; do
+    split_dir="${DATASETS_PREPROCESS_ROOT%/}/${rel}"
+    if [[ ! -f "${split_dir}/metadata.json" ]] || ! compgen -G "${split_dir}/dataset-*.tar" >/dev/null; then
+      echo "[ERR] Missing preprocessed WebDataset split: ${split_dir}" >&2
+      missing=1
+    fi
+  done < <(dataset_required_splits)
+  if [[ "${missing}" -ne 0 ]]; then
+    echo "[ERR] Preprocess the raw images before training, for example:" >&2
+    echo "  bash scripts/preprocess_dataset.sh --dataset ${DATASET_NAME} --raw-root datasets_raw --output-root ${DATASETS_PREPROCESS_ROOT} --overwrite" >&2
+    exit 1
+  fi
+}
+
+assert_dataset_preprocessed
 
 is_truthy() {
   [[ "${1:-}" =~ ^(1|true|TRUE|yes|YES|y|Y|on|ON)$ ]]
@@ -316,6 +352,7 @@ expected_fit_steps() {
 import math
 import sys
 import yaml
+import os
 
 cfg_path, override = sys.argv[1:]
 with open(cfg_path, "r", encoding="utf-8") as handle:
@@ -398,6 +435,7 @@ with open(base, "r", encoding="utf-8") as handle:
     cfg = yaml.safe_load(handle)
 cfg["route"] = route if route in {"psl_flow", "klvae_sit"} else cfg.get("route")
 datasets = cfg.setdefault("datasets", {})
+datasets["datasets_folder"] = os.environ.get("DATASETS_PREPROCESS_ROOT", datasets.get("datasets_folder", "./datasets_preprocess"))
 datasets["train_datasets"] = [dataset]
 datasets["val_datasets"] = [dataset]
 datasets["test_datasets"] = [dataset]
