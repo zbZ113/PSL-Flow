@@ -1,4 +1,4 @@
-﻿route: psl_flow
+route: psl_flow
 model:
   model_arch: psl_flow
   model_config:

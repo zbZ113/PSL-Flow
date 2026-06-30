@@ -1,4 +1,4 @@
-﻿route: klvae_sit
+route: klvae_sit
 model:
   model_arch: klvae_sit
   model_config:

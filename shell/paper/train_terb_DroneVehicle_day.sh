@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env bash
+#!/usr/bin/env bash
 set -Eeuo pipefail
 CONFIG="${CONFIG:-psl_flow/configs/paper/terb_DroneVehicle_day.yml}"
 ROOT="${ROOT:-logs/paper/DroneVehicle_day/terb}"

@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env bash
+#!/usr/bin/env bash
 set -Eeuo pipefail
 CONFIG="${CONFIG:-psl_flow/configs/paper/psl_flow_CART.yml}"
 ROOT="${ROOT:-logs/paper/CART/psl_flow}"

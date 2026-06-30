@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env bash
+#!/usr/bin/env bash
 set -Eeuo pipefail
 CONFIG="${CONFIG:-psl_flow/configs/paper/klvae_sit_AVIID.yml}"
 ROOT="${ROOT:-logs/paper/AVIID/klvae_sit}"

@@ -1,4 +1,4 @@
-﻿model:
+model:
   model_arch: psl_vae
   model_config:
     in_channels: 5

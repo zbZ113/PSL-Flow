@@ -1,4 +1,4 @@
-﻿model:
+model:
   model_arch: terb
   model_config:
     smp_model: Unet

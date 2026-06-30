@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env bash
+#!/usr/bin/env bash
 set -Eeuo pipefail
 CONFIG="${CONFIG:-psl_flow/configs/paper/psl_vae_DroneVehicle_night.yml}"
 ROOT="${ROOT:-logs/paper/DroneVehicle_night/psl_vae}"
