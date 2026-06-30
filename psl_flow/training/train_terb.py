@@ -77,7 +77,7 @@ def _emit_metrics(label: str, results: list[dict[str, Any]], metrics_json: str |
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser("Train paper-aligned TeR-B")
+    parser = argparse.ArgumentParser("Train TeR-B")
     parser.add_argument("--config", required=True)
     parser.add_argument("--mode", choices=["fit", "validate"], default="fit")
     parser.add_argument("--default-root-dir", default=None)

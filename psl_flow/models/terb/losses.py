@@ -16,7 +16,7 @@ class TeRBLossConfig:
 
 
 class TeRBLoss(nn.Module):
-    """Paper TeR-B loss: L1(S_phys, S) + beta * BCE(B, Sobel(S))."""
+    """TeR-B loss: L1(S_phys, S) + beta * BCE(B, Sobel(S))."""
 
     def __init__(self, config: TeRBLossConfig | Dict | None = None):
         super().__init__()

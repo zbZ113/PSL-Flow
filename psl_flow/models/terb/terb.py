@@ -11,7 +11,7 @@ from psl_flow.models.terb.smp_backbone import SMPWrapper
 
 
 class TeRB(nn.Module):
-    """Paper-aligned TeR-B teacher."""
+    """TeR-B teacher."""
 
     def __init__(
         self,
@@ -33,7 +33,7 @@ class TeRB(nn.Module):
             encoder_weights=smp_encoder_weights,
             in_channels=1,
             out_channels=2 + self.vnums + 1,
-            import_context="paper TeRB",
+            import_context="TeRB",
         )
         self.local_env = LocalEnvEstimator(kernel_size=int(erme_kernel))
         init = torch.tensor(float(lambda_env_init)).clamp(1e-4, 1.0 - 1e-4)

@@ -138,7 +138,7 @@ class PSLVAE(nn.Module):
         expected_channels = int(self.transform.stack_channels)
         if int(config.in_channels) != expected_channels or int(config.out_channels) != expected_channels:
             raise ValueError(
-                "Paper PSL-VAE expects five factor channels [T,e,R_env,B,Delta]; "
+                "PSL-VAE expects five factor channels [T,e,R_env,B,Delta]; "
                 f"got in_channels={config.in_channels}, out_channels={config.out_channels}."
             )
         self.vae = _build_autoencoder_kl(config.autoencoder_config())

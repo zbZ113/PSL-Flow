@@ -1,6 +1,6 @@
 # PSL-Flow
 
-Clean paper-facing implementation of Physics-Structured Latent Flow Matching for visible-to-infrared image translation.
+Clean implementation of Physics-Structured Latent Flow Matching for visible-to-infrared image translation.
 
 The public code contains four routes only:
 
@@ -50,20 +50,20 @@ thermal.png
 {"num_samples": 2412}
 ```
 
-Supported paper dataset keys are `AVIID`, `CART`, `DroneVehicle_day`, and `DroneVehicle_night`.
+Supported dataset keys are `AVIID`, `CART`, `DroneVehicle_day`, and `DroneVehicle_night`.
 
 ## One-Command Workflows
 
 Run the full TeR-B -> PSL-VAE -> PSL-Flow route:
 
 ```bash
-bash scripts/run_paper_pipeline.sh --dataset AVIID --route psl_flow
+bash scripts/run_pipeline.sh --dataset AVIID --route psl_flow
 ```
 
 Run the KLVAE-SiT ablation route:
 
 ```bash
-bash scripts/run_paper_pipeline.sh --dataset AVIID --route klvae_sit
+bash scripts/run_pipeline.sh --dataset AVIID --route klvae_sit
 ```
 
 The pipeline defaults to GPU 1, batch size 16, no validation during training, checkpoints at 45K and 75K SiT steps, and one final validation at the end. It records elapsed time and peak GPU memory in `summary.csv`.
@@ -82,18 +82,18 @@ For the PSL-Flow route, `thermal_normalizer` is not fixed in the base config. Th
 
 ## Configs
 
-Paper configs live in `psl_flow/configs/paper/`:
+Experiment configs live in `psl_flow/configs/experiments/`:
 
 - `terb_<dataset>.yml`
 - `psl_vae_<dataset>.yml`
 - `psl_flow_<dataset>.yml`
 - `klvae_sit_<dataset>.yml`
 
-Dataset split definitions live in `psl_flow/configs/paper/datasets/`.
+Dataset split definitions live in `psl_flow/configs/experiments/datasets/`.
 
 ## Checkpoints
 
-No checkpoint is bundled with this repository. The pipeline writes new checkpoints under `logs/paper_runs/<dataset>/<route>/<run_id>/artifacts/`.
+No checkpoint is bundled with this repository. The pipeline writes new checkpoints under `logs/experiments/<dataset>/<route>/<run_id>/artifacts/`.
 
 For `psl_flow`, the next stage automatically consumes the final checkpoint from the previous stage. For `klvae_sit`, provide a trained thermal KL-VAE checkpoint through `THERMAL_KLVAE_CKPT`.
 
@@ -102,7 +102,7 @@ For `psl_flow`, the next stage automatically consumes the final checkpoint from 
 Final metrics are written as JSON under:
 
 ```text
-logs/paper_runs/<dataset>/<route>/<run_id>/artifacts/metrics/
+logs/experiments/<dataset>/<route>/<run_id>/artifacts/metrics/
 ```
 
 The same run directory can be resumed. If complete checkpoints already exist, the pipeline reuses them and continues with the missing validation or next stage.

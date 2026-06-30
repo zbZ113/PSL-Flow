@@ -133,7 +133,7 @@ def _decode_thermal_to_01(decoded: torch.Tensor) -> torch.Tensor:
 
 
 class PSLFlowLightningModule(pl.LightningModule):
-    """Paper-route SiT wrapper.
+    """PSL-Flow SiT wrapper.
 
     Target latent: z_phys = PSLVAE([T,e,R_env,B,Delta]).
     Condition latent: z_vis = RGB KL-VAE(x_vis).
@@ -482,7 +482,7 @@ def _trainer_from_args(config: dict[str, Any], args: argparse.Namespace, *, with
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser("Train/test paper-aligned PSL-Flow")
+    parser = argparse.ArgumentParser("Train/test PSL-Flow")
     parser.add_argument("--config", required=True)
     parser.add_argument("--mode", choices=["fit", "validate", "test"], default="fit")
     parser.add_argument("--default-root-dir", default=None)

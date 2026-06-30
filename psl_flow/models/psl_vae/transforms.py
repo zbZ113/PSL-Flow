@@ -60,7 +60,7 @@ class PSLFactorTransformConfig:
 
 
 class PSLFactorTransform(nn.Module):
-    """Build and decode the paper five-channel stack [T, e, R_env, B, Delta]."""
+    """Build and decode the five-channel stack [T, e, R_env, B, Delta]."""
 
     def __init__(self, config: PSLFactorTransformConfig | Dict | None = None):
         super().__init__()

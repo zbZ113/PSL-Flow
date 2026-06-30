@@ -1,1 +1,1 @@
-"""Training entry points for paper-facing PSL-Flow."""
+"""Training entry points for PSL-Flow."""

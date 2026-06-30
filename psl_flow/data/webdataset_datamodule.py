@@ -112,7 +112,7 @@ class RandomChainDataset(torch.utils.data.ChainDataset):
         return total
 
 
-class PaperWebDataModule(pl.LightningDataModule):
+class PSLFlowWebDataModule(pl.LightningDataModule):
     def __init__(
         self,
         datasets_folder: str = "./datasets_preprocess",
@@ -134,7 +134,7 @@ class PaperWebDataModule(pl.LightningDataModule):
         self.num_workers = int(num_workers)
         self.image_norm = str(image_norm)
         self.dataset_config_root = Path(dataset_config_root) if dataset_config_root else (
-            Path(__file__).resolve().parents[1] / "configs" / "paper" / "datasets"
+            Path(__file__).resolve().parents[1] / "configs" / "experiments" / "datasets"
         )
 
         if self.image_norm == "normal":
@@ -350,7 +350,7 @@ def thermal_to_01(x: torch.Tensor) -> torch.Tensor:
     return x.float().div(255.0).clamp(0.0, 1.0)
 
 
-def build_data_module(config: dict[str, Any]) -> PaperWebDataModule:
+def build_data_module(config: dict[str, Any]) -> PSLFlowWebDataModule:
     datasets = dict(config.get("datasets", {}))
     training = dict(config.get("training", {}))
     dataset_names = SimpleNamespace(
@@ -360,7 +360,7 @@ def build_data_module(config: dict[str, Any]) -> PaperWebDataModule:
     )
     train_size = training.get("train_image_size", [256, 256])
     train_cfg_training = SimpleNamespace(num_samples_per_epoch=int(training.get("num_samples_per_epoch", 10000)))
-    return PaperWebDataModule(
+    return PSLFlowWebDataModule(
         datasets_folder=str(datasets.get("datasets_folder", "./datasets_preprocess")),
         train_batch_size=int(training.get("train_batch_size", 16)),
         test_batch_size=int(training.get("test_batch_size", 16)),
