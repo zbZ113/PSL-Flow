@@ -391,8 +391,16 @@ class PSLFlowLightningModule(pl.LightningModule):
         z0 = torch.randn(rgb.shape[0], int(self.psl_vae.latent_channels), h, w, device=rgb.device, dtype=z_vis.dtype)
         sample_fn = self.sampler.sample_ode(**self.sample_ode)
         model = self.ema if use_ema else self.sit
+        model_forward = model.forward
+        active_efficiency_split = getattr(self, "_active_efficiency_split", None)
+        if active_efficiency_split:
+            def counted_forward(*args, **kwargs):
+                stats = self._efficiency_stats.setdefault(active_efficiency_split, {"elapsed": 0.0, "samples": 0, "flops": None, "nfe": 0, "batches": 0})
+                stats["nfe"] = int(stats.get("nfe") or 0) + 1
+                return model.forward(*args, **kwargs)
+            model_forward = counted_forward
         with torch.no_grad():
-            samples = sample_fn(z0, model.forward, y=dataset_idx, x_RGB=z_vis)[-1]
+            samples = sample_fn(z0, model_forward, y=dataset_idx, x_RGB=z_vis)[-1]
         return samples / self.thermal_normalizer
 
     def generate(self, rgb: torch.Tensor, dataset_idx: torch.Tensor) -> torch.Tensor:
@@ -406,7 +414,7 @@ class PSLFlowLightningModule(pl.LightningModule):
 
     def _reset_efficiency(self, split: str) -> None:
         if self.eval_efficiency and not getattr(self.trainer, "sanity_checking", False):
-            self._efficiency_stats[split] = {"elapsed": 0.0, "samples": 0, "flops": None}
+            self._efficiency_stats[split] = {"elapsed": 0.0, "samples": 0, "flops": None, "nfe": 0, "batches": 0}
 
     def _generate_with_efficiency(self, split: str, rgb: torch.Tensor, dataset_idx: torch.Tensor) -> torch.Tensor:
         if not self.eval_efficiency or getattr(self.trainer, "sanity_checking", False):
@@ -414,12 +422,17 @@ class PSLFlowLightningModule(pl.LightningModule):
         device = rgb.device
         _sync_if_cuda(device)
         start = time.perf_counter()
-        pred = self.generate(rgb, dataset_idx)
+        self._active_efficiency_split = split
+        try:
+            pred = self.generate(rgb, dataset_idx)
+        finally:
+            self._active_efficiency_split = None
         _sync_if_cuda(device)
         elapsed = time.perf_counter() - start
-        stats = self._efficiency_stats.setdefault(split, {"elapsed": 0.0, "samples": 0, "flops": None})
+        stats = self._efficiency_stats.setdefault(split, {"elapsed": 0.0, "samples": 0, "flops": None, "nfe": 0, "batches": 0})
         stats["elapsed"] = float(stats["elapsed"] or 0.0) + elapsed
         stats["samples"] = int(stats["samples"] or 0) + int(rgb.shape[0])
+        stats["batches"] = int(stats.get("batches") or 0) + 1
         if stats.get("flops") is None:
             batch_size = max(int(rgb.shape[0]), 1)
             devices = [device.index if device.index is not None else torch.cuda.current_device()] if device.type == "cuda" else []
@@ -444,11 +457,16 @@ class PSLFlowLightningModule(pl.LightningModule):
         rt = float(stats.get("elapsed") or 0.0) / float(samples)
         params_m = self._inference_params_m()
         flops_g = float(stats.get("flops") or 0.0) / 1e9
+        nfe = int(stats.get("nfe") or 0)
+        batches = max(int(stats.get("batches") or 0), 1)
         self.log(f"{split}/RT(s)", torch.tensor(rt, device=self.device), sync_dist=True, add_dataloader_idx=False)
         self.log(f"{split}/Params(M)", torch.tensor(params_m, device=self.device), sync_dist=True, add_dataloader_idx=False)
+        self.log(f"{split}/NFE", torch.tensor(float(nfe), device=self.device), sync_dist=True, add_dataloader_idx=False)
+        self.log(f"{split}/NFE_per_batch", torch.tensor(float(nfe) / float(batches), device=self.device), sync_dist=True, add_dataloader_idx=False)
+        self.log(f"{split}/NFE_per_sample", torch.tensor(float(nfe) / float(samples), device=self.device), sync_dist=True, add_dataloader_idx=False)
         if flops_g > 0.0:
             self.log(f"{split}/FLOPs(G)", torch.tensor(flops_g, device=self.device), sync_dist=True, add_dataloader_idx=False)
-        print(f"[efficiency] {split}/FLOPs(G)={flops_g:.4f}, {split}/Params(M)={params_m:.4f}, {split}/RT(s)={rt:.6f}, samples={samples}")
+        print(f"[efficiency] {split}/FLOPs(G)={flops_g:.4f}, {split}/Params(M)={params_m:.4f}, {split}/RT(s)={rt:.6f}, samples={samples}, NFE={nfe}, NFE/batch={float(nfe)/float(batches):.4f}, NFE/sample={float(nfe)/float(samples):.4f}")
 
     def validation_step(self, batch, batch_idx):
         rgb, thermal, dataset_idx = batch[:3]
@@ -631,8 +649,16 @@ class KLVaeSiTLightningModule(pl.LightningModule):
         z0 = torch.randn(rgb.shape[0], self.thermal_latent_channels, h, w, device=rgb.device, dtype=z_vis.dtype)
         sample_fn = self.sampler.sample_ode(**self.sample_ode)
         model = self.ema if use_ema else self.sit
+        model_forward = model.forward
+        active_efficiency_split = getattr(self, "_active_efficiency_split", None)
+        if active_efficiency_split:
+            def counted_forward(*args, **kwargs):
+                stats = self._efficiency_stats.setdefault(active_efficiency_split, {"elapsed": 0.0, "samples": 0, "flops": None, "nfe": 0, "batches": 0})
+                stats["nfe"] = int(stats.get("nfe") or 0) + 1
+                return model.forward(*args, **kwargs)
+            model_forward = counted_forward
         with torch.no_grad():
-            samples = sample_fn(z0, model.forward, y=dataset_idx, x_RGB=z_vis)[-1]
+            samples = sample_fn(z0, model_forward, y=dataset_idx, x_RGB=z_vis)[-1]
         return samples / self.thermal_normalizer
 
     def generate(self, rgb: torch.Tensor, dataset_idx: torch.Tensor) -> torch.Tensor:
@@ -646,7 +672,7 @@ class KLVaeSiTLightningModule(pl.LightningModule):
 
     def _reset_efficiency(self, split: str) -> None:
         if self.eval_efficiency and not getattr(self.trainer, "sanity_checking", False):
-            self._efficiency_stats[split] = {"elapsed": 0.0, "samples": 0, "flops": None}
+            self._efficiency_stats[split] = {"elapsed": 0.0, "samples": 0, "flops": None, "nfe": 0, "batches": 0}
 
     def _generate_with_efficiency(self, split: str, rgb: torch.Tensor, dataset_idx: torch.Tensor) -> torch.Tensor:
         if not self.eval_efficiency or getattr(self.trainer, "sanity_checking", False):
@@ -654,12 +680,17 @@ class KLVaeSiTLightningModule(pl.LightningModule):
         device = rgb.device
         _sync_if_cuda(device)
         start = time.perf_counter()
-        pred = self.generate(rgb, dataset_idx)
+        self._active_efficiency_split = split
+        try:
+            pred = self.generate(rgb, dataset_idx)
+        finally:
+            self._active_efficiency_split = None
         _sync_if_cuda(device)
         elapsed = time.perf_counter() - start
-        stats = self._efficiency_stats.setdefault(split, {"elapsed": 0.0, "samples": 0, "flops": None})
+        stats = self._efficiency_stats.setdefault(split, {"elapsed": 0.0, "samples": 0, "flops": None, "nfe": 0, "batches": 0})
         stats["elapsed"] = float(stats["elapsed"] or 0.0) + elapsed
         stats["samples"] = int(stats["samples"] or 0) + int(rgb.shape[0])
+        stats["batches"] = int(stats.get("batches") or 0) + 1
         if stats.get("flops") is None:
             batch_size = max(int(rgb.shape[0]), 1)
             devices = [device.index if device.index is not None else torch.cuda.current_device()] if device.type == "cuda" else []
@@ -684,11 +715,16 @@ class KLVaeSiTLightningModule(pl.LightningModule):
         rt = float(stats.get("elapsed") or 0.0) / float(samples)
         params_m = self._inference_params_m()
         flops_g = float(stats.get("flops") or 0.0) / 1e9
+        nfe = int(stats.get("nfe") or 0)
+        batches = max(int(stats.get("batches") or 0), 1)
         self.log(f"{split}/RT(s)", torch.tensor(rt, device=self.device), sync_dist=True, add_dataloader_idx=False)
         self.log(f"{split}/Params(M)", torch.tensor(params_m, device=self.device), sync_dist=True, add_dataloader_idx=False)
+        self.log(f"{split}/NFE", torch.tensor(float(nfe), device=self.device), sync_dist=True, add_dataloader_idx=False)
+        self.log(f"{split}/NFE_per_batch", torch.tensor(float(nfe) / float(batches), device=self.device), sync_dist=True, add_dataloader_idx=False)
+        self.log(f"{split}/NFE_per_sample", torch.tensor(float(nfe) / float(samples), device=self.device), sync_dist=True, add_dataloader_idx=False)
         if flops_g > 0.0:
             self.log(f"{split}/FLOPs(G)", torch.tensor(flops_g, device=self.device), sync_dist=True, add_dataloader_idx=False)
-        print(f"[efficiency] {split}/FLOPs(G)={flops_g:.4f}, {split}/Params(M)={params_m:.4f}, {split}/RT(s)={rt:.6f}, samples={samples}")
+        print(f"[efficiency] {split}/FLOPs(G)={flops_g:.4f}, {split}/Params(M)={params_m:.4f}, {split}/RT(s)={rt:.6f}, samples={samples}, NFE={nfe}, NFE/batch={float(nfe)/float(batches):.4f}, NFE/sample={float(nfe)/float(samples):.4f}")
 
     def validation_step(self, batch, batch_idx):
         rgb, thermal, dataset_idx = batch[:3]
