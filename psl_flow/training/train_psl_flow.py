@@ -20,6 +20,11 @@ from psl_flow.models.lpips import LPIPS
 from psl_flow.models.psl_vae import PSLVAE, build_terb_teacher
 from psl_flow.models.sit import sit_networks
 from psl_flow.models.sit.transport import Sampler, create_transport
+from psl_flow.training.callbacks import (
+    build_management_callbacks,
+    configure_training_runtime,
+    copy_best_checkpoint_alias,
+)
 from psl_flow.utils.checkpoint import load_state_dict_flexible
 
 
@@ -130,6 +135,10 @@ def _decode_thermal_to_01(decoded: torch.Tensor) -> torch.Tensor:
     if decoded.shape[1] > 1:
         decoded = decoded.mean(dim=1, keepdim=True)
     return thermal_to_01(decoded)
+
+
+def _rgb_to_01(rgb: torch.Tensor) -> torch.Tensor:
+    return torch.clamp(rgb * 0.5 + 0.5, 0.0, 1.0)
 
 
 class PSLFlowLightningModule(pl.LightningModule):
@@ -270,7 +279,14 @@ class PSLFlowLightningModule(pl.LightningModule):
             pred_lpips = _repeat_to_three(pred * 2.0 - 1.0)
             target_lpips = _repeat_to_three(target * 2.0 - 1.0)
             self.log("val/LPIPS", self.eval_lpips(pred_lpips, target_lpips).mean(), sync_dist=True)
-        return pred
+        error = (pred - target).abs()
+        return {
+            "RGB": _rgb_to_01(rgb),
+            "GT": target,
+            "pred": pred,
+            "error": error,
+            "compare": torch.cat([target, pred, error], dim=-1),
+        }
 
     def test_step(self, batch, batch_idx):
         rgb, thermal, dataset_idx = batch[:3]
@@ -282,7 +298,14 @@ class PSLFlowLightningModule(pl.LightningModule):
             pred_lpips = _repeat_to_three(pred * 2.0 - 1.0)
             target_lpips = _repeat_to_three(target * 2.0 - 1.0)
             self.log("test/LPIPS", self.eval_lpips(pred_lpips, target_lpips).mean(), sync_dist=True)
-        return pred
+        error = (pred - target).abs()
+        return {
+            "RGB": _rgb_to_01(rgb),
+            "GT": target,
+            "pred": pred,
+            "error": error,
+            "compare": torch.cat([target, pred, error], dim=-1),
+        }
 
 
 class KLVaeSiTLightningModule(pl.LightningModule):
@@ -410,7 +433,14 @@ class KLVaeSiTLightningModule(pl.LightningModule):
                 self.eval_lpips(_repeat_to_three(pred * 2.0 - 1.0), _repeat_to_three(target * 2.0 - 1.0)).mean(),
                 sync_dist=True,
             )
-        return pred
+        error = (pred - target).abs()
+        return {
+            "RGB": _rgb_to_01(rgb),
+            "GT": target,
+            "pred": pred,
+            "error": error,
+            "compare": torch.cat([target, pred, error], dim=-1),
+        }
 
     def test_step(self, batch, batch_idx):
         rgb, thermal, dataset_idx = batch[:3]
@@ -424,7 +454,14 @@ class KLVaeSiTLightningModule(pl.LightningModule):
                 self.eval_lpips(_repeat_to_three(pred * 2.0 - 1.0), _repeat_to_three(target * 2.0 - 1.0)).mean(),
                 sync_dist=True,
             )
-        return pred
+        error = (pred - target).abs()
+        return {
+            "RGB": _rgb_to_01(rgb),
+            "GT": target,
+            "pred": pred,
+            "error": error,
+            "compare": torch.cat([target, pred, error], dim=-1),
+        }
 
 
 def load_yaml(path: str | Path) -> dict[str, Any]:
@@ -451,18 +488,51 @@ def _emit_metrics(label: str, results: list[dict[str, Any]], metrics_json: str |
         print(f"[{label}] wrote metrics: {out}")
 
 
-def _trainer_from_args(config: dict[str, Any], args: argparse.Namespace, *, with_checkpoints: bool = False) -> pl.Trainer:
+def _parse_interval(value: Any) -> int | float | None:
+    if value in (None, ""):
+        return None
+    if isinstance(value, (int, float)):
+        return value
+    text = str(value).strip()
+    return float(text) if "." in text else int(text)
+
+
+def _parse_check_val_every(value: Any) -> int | None:
+    if value in (None, ""):
+        return 1
+    number = int(value)
+    return None if number <= 0 else number
+
+
+def _trainer_from_args(config: dict[str, Any], args: argparse.Namespace, *, with_checkpoints: bool = False) -> tuple[pl.Trainer, list[pl.Callback]]:
     training = dict(config.get("training", {}))
-    callbacks = []
+    monitor = str(training.get("checkpoint_monitor", "val/LPIPS"))
+    mode = str(training.get("checkpoint_mode", "min"))
+    callbacks = build_management_callbacks(training, root_dir=args.default_root_dir, monitor=monitor, mode=mode)
+    limit_val_batches = args.limit_val_batches if args.limit_val_batches is not None else training.get("limit_val_batches", None)
     if with_checkpoints:
+        if args.checkpoint_every_n_train_steps:
+            callbacks.append(
+                pl.callbacks.ModelCheckpoint(
+                    save_last=False,
+                    save_top_k=-1,
+                    every_n_train_steps=args.checkpoint_every_n_train_steps,
+                    filename="step_{step:06d}",
+                    auto_insert_metric_name=False,
+                )
+            )
+        save_top_k = 0 if limit_val_batches == 0 else int(training.get("checkpoint_save_top_k", 1))
         callbacks.append(
             pl.callbacks.ModelCheckpoint(
                 save_last=True,
-                every_n_train_steps=args.checkpoint_every_n_train_steps,
-                save_top_k=0 if args.limit_val_batches == 0 else int(training.get("checkpoint_save_top_k", 1)),
+                monitor=monitor if save_top_k != 0 else None,
+                mode=mode,
+                save_top_k=save_top_k,
+                filename="best",
+                auto_insert_metric_name=False,
             )
         )
-    return pl.Trainer(
+    trainer = pl.Trainer(
         max_epochs=int(training.get("num_epochs", 1000)),
         max_steps=args.max_steps if args.max_steps is not None else int(training.get("max_steps", -1)),
         accelerator=args.accelerator,
@@ -472,13 +542,18 @@ def _trainer_from_args(config: dict[str, Any], args: argparse.Namespace, *, with
         precision="16-mixed" if bool(training.get("mixed_precision", False)) else "32-true",
         callbacks=callbacks,
         logger=False if bool(training.get("disable_logger", False)) else True,
-        limit_val_batches=args.limit_val_batches if args.limit_val_batches is not None else training.get("limit_val_batches", None),
-        check_val_every_n_epoch=args.check_val_every_n_epoch
+        limit_val_batches=limit_val_batches,
+        check_val_every_n_epoch=_parse_check_val_every(args.check_val_every_n_epoch)
         if args.check_val_every_n_epoch is not None
-        else int(training.get("check_val_every_n_epoch", 1)),
+        else _parse_check_val_every(training.get("check_val_every_n_epoch", 1)),
+        val_check_interval=_parse_interval(args.val_check_interval)
+        if args.val_check_interval is not None
+        else _parse_interval(training.get("val_check_interval", None)),
         accumulate_grad_batches=int(training.get("gradient_accumulation", 1)),
         log_every_n_steps=int(training.get("log_every_n_steps", 50)),
+        gradient_clip_val=float(training.get("gradient_clip_val", 0.0) or 0.0),
     )
+    return trainer, callbacks
 
 
 def main() -> None:
@@ -496,12 +571,14 @@ def main() -> None:
     parser.add_argument("--metrics-json", default=None)
     parser.add_argument("--limit-val-batches", type=float, default=None)
     parser.add_argument("--check-val-every-n-epoch", type=int, default=None)
+    parser.add_argument("--val-check-interval", default=None)
     args = parser.parse_args()
     config = load_yaml(args.config)
+    configure_training_runtime(dict(config.get("training", {})))
     route = validate_route(config.get("route") or config.get("model", {}).get("route") or config.get("model", {}).get("model_arch"))
     data = build_data_module(config)
     module = PSLFlowLightningModule(config) if route == "psl_flow" else KLVaeSiTLightningModule(config)
-    trainer = _trainer_from_args(config, args, with_checkpoints=args.mode == "fit")
+    trainer, callbacks = _trainer_from_args(config, args, with_checkpoints=args.mode == "fit")
     if args.mode == "fit":
         trainer.fit(module, datamodule=data, ckpt_path=args.resume_from)
         if trainer.is_global_zero:
@@ -509,6 +586,7 @@ def main() -> None:
             final_ckpt.parent.mkdir(parents=True, exist_ok=True)
             trainer.save_checkpoint(str(final_ckpt))
             print(f"[{route}] saved final checkpoint: {final_ckpt}")
+            copy_best_checkpoint_alias(callbacks, Path(args.default_root_dir or trainer.default_root_dir))
     elif args.mode == "validate":
         results = trainer.validate(module, datamodule=data, ckpt_path=args.ckpt)
         if trainer.is_global_zero:

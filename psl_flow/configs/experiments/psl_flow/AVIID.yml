@@ -103,8 +103,18 @@ training:
     config:
   mixed_precision: false
   gradient_accumulation: 1
-  check_val_every_n_epoch: 50
+  gradient_clip_val: 1.0
+  check_val_every_n_epoch: 0
+  val_check_interval: 5000
   limit_val_batches:
   checkpoint_save_top_k: 1
+  checkpoint_monitor: val/LPIPS
+  checkpoint_mode: min
   disable_logger: false
   log_every_n_steps: 50
+  seed: 1234
+  cuda_tf32: true
+  float32_matmul_precision: high
+  export_samples: true
+  num_sample_images: 4
+  num_sample_batches: 1

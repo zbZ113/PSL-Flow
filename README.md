@@ -109,7 +109,24 @@ Run the KLVAE-SiT ablation route:
 bash scripts/run_pipeline.sh --dataset AVIID --route klvae_sit
 ```
 
-The pipeline defaults to GPU 1, batch size 16, no validation during training, checkpoints at 45K and 75K SiT steps, and one final validation at the end. It records elapsed time and peak GPU memory in `summary.csv`.
+The pipeline defaults to GPU 1, batch size 16, dataset-size epochs for TeR-B/PSL-VAE, training-time validation, fixed SiT step checkpoints, and one final validation at the end. It records elapsed time and peak GPU memory in `summary.csv`.
+
+Default training management:
+
+- TeR-B: 200 epochs, validation every 20 epochs, `best.ckpt` by `val/loss_total`, plus `last.ckpt`.
+- PSL-VAE: 300 epochs, validation every 50 epochs, `best.ckpt` by `val/LPIPS`, plus `last.ckpt`.
+- PSL-Flow / SiT: validation every 5K steps, step checkpoints from the experiment table, plus `last.ckpt` and `best.ckpt` when validation is enabled.
+- Qualitative samples are written under `val_samples/`, `test_samples/`, and `best_samples/latest`.
+- Local metric traces are written to `local_logs/metrics.csv` and `local_logs/history.jsonl`.
+
+Default PSL-Flow step checkpoints:
+
+| Dataset | PSL-Flow steps | KLVAE-SiT step |
+| --- | --- | --- |
+| AVIID | 45K, 75K | 45K |
+| CART | 35K, 65K | 35K |
+| DroneVehicle_day | 70K, 100K | 70K |
+| DroneVehicle_night | 90K, 120K | 90K |
 
 Useful environment overrides:
 
@@ -119,9 +136,20 @@ NVIDIA_SMI_GPU_ID=1
 RGB_VAE_PATH=/root/autodl-fs/sd-vae-ft-ema
 THERMAL_KLVAE_CKPT=/path/to/thermal_klvae.ckpt
 THERMAL_KLVAE_NORMALIZER=1.0
+TRAIN_WITH_VALIDATION=1
+TERB_NUM_SAMPLES_PER_EPOCH=auto
+PSLVAE_NUM_SAMPLES_PER_EPOCH=auto
+FLOW_NUM_SAMPLES_PER_EPOCH=10000
+PSLVAE_SELECT=best_lpips      # best_lpips, best_psnr, best_ssim, best_fid, epoch, last
+PSLVAE_EPOCH=280             # used only when PSLVAE_SELECT=epoch
+FLOW_VAL_EVERY_STEPS=5000
+SIT_STEP_1=45000
+SIT_STEP_2=75000
 ```
 
-For the PSL-Flow route, `thermal_normalizer` is not fixed in the base config. The pipeline estimates it from the trained PSL-VAE latent statistics and writes a patched run config before SiT training starts.
+Set `TRAIN_WITH_VALIDATION=0` only for timing-only benchmark runs. In that mode, the pipeline keeps `last.ckpt` and final validation, but training-time best checkpoint selection is unavailable.
+
+For the PSL-Flow route, `thermal_normalizer` is not fixed in the base config. The pipeline selects the PSL-VAE checkpoint according to `PSLVAE_SELECT`, estimates latent statistics from that selected model, and writes `psl_vae_ckpt`, `thermal_normalizer`, latent mean/std, and the stats JSON path into the patched SiT config before training starts.
 
 ## Configs
 

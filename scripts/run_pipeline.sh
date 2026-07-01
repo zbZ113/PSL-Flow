@@ -68,19 +68,46 @@ PL_ACCELERATOR_DEFAULT="${PL_ACCELERATOR_DEFAULT:-gpu}"
 TRAIN_BATCH_SIZE_DEFAULT="${TRAIN_BATCH_SIZE_DEFAULT:-16}"
 TEST_BATCH_SIZE_DEFAULT="${TEST_BATCH_SIZE_DEFAULT:-16}"
 NUM_WORKERS_DEFAULT="${NUM_WORKERS_DEFAULT:-8}"
-TERB_NUM_SAMPLES_PER_EPOCH="${TERB_NUM_SAMPLES_PER_EPOCH:-${NUM_SAMPLES_PER_EPOCH:-2412}}"
-PSLVAE_NUM_SAMPLES_PER_EPOCH="${PSLVAE_NUM_SAMPLES_PER_EPOCH:-${NUM_SAMPLES_PER_EPOCH:-2412}}"
+TRAIN_WITH_VALIDATION="${TRAIN_WITH_VALIDATION:-1}"
+TERB_NUM_EPOCHS="${TERB_NUM_EPOCHS:-200}"
+PSLVAE_NUM_EPOCHS="${PSLVAE_NUM_EPOCHS:-300}"
+TERB_VAL_EVERY_EPOCHS="${TERB_VAL_EVERY_EPOCHS:-20}"
+PSLVAE_VAL_EVERY_EPOCHS="${PSLVAE_VAL_EVERY_EPOCHS:-50}"
+FLOW_VAL_EVERY_STEPS="${FLOW_VAL_EVERY_STEPS:-5000}"
+SIT_CHECKPOINT_EVERY_STEPS="${SIT_CHECKPOINT_EVERY_STEPS:-${FLOW_VAL_EVERY_STEPS}}"
+TERB_NUM_SAMPLES_PER_EPOCH="${TERB_NUM_SAMPLES_PER_EPOCH:-${NUM_SAMPLES_PER_EPOCH:-auto}}"
+PSLVAE_NUM_SAMPLES_PER_EPOCH="${PSLVAE_NUM_SAMPLES_PER_EPOCH:-${NUM_SAMPLES_PER_EPOCH:-auto}}"
 FLOW_NUM_SAMPLES_PER_EPOCH="${FLOW_NUM_SAMPLES_PER_EPOCH:-10000}"
 MIXED_PRECISION="${MIXED_PRECISION:-false}"
-NORMALIZER_MAX_SAMPLES="${NORMALIZER_MAX_SAMPLES:-${PSLVAE_NUM_SAMPLES_PER_EPOCH}}"
+GRADIENT_CLIP_VAL="${GRADIENT_CLIP_VAL:-1.0}"
+RUN_SEED="${RUN_SEED:-1234}"
+CUDA_TF32="${CUDA_TF32:-true}"
+FLOAT32_MATMUL_PRECISION="${FLOAT32_MATMUL_PRECISION:-high}"
+NUM_SAMPLE_IMAGES="${NUM_SAMPLE_IMAGES:-4}"
+NUM_SAMPLE_BATCHES="${NUM_SAMPLE_BATCHES:-1}"
+PSLVAE_SELECT="${PSLVAE_SELECT:-best_lpips}"
+PSLVAE_EPOCH="${PSLVAE_EPOCH:-}"
+PSLVAE_CHECKPOINT_MONITOR="${PSLVAE_CHECKPOINT_MONITOR:-val/LPIPS}"
+FLOW_CHECKPOINT_MONITOR="${FLOW_CHECKPOINT_MONITOR:-val/LPIPS}"
+NORMALIZER_MAX_SAMPLES="${NORMALIZER_MAX_SAMPLES:-auto}"
 NORMALIZER_DEVICE="${NORMALIZER_DEVICE:-auto}"
 NORMALIZER_LATENT_SAMPLE_MODE="${NORMALIZER_LATENT_SAMPLE_MODE:-sample}"
 NORMALIZER_SEED="${NORMALIZER_SEED:-1234}"
 
 TERB_MAX_STEPS="${TERB_MAX_STEPS:-}"
 PSLVAE_MAX_STEPS="${PSLVAE_MAX_STEPS:-}"
-SIT_STEP_1="${SIT_STEP_1:-45000}"
-SIT_STEP_2="${SIT_STEP_2:-75000}"
+case "${DATASET_NAME}:${ROUTE}" in
+  AVIID:psl_flow) DEFAULT_SIT_STEP_1=45000; DEFAULT_SIT_STEP_2=75000 ;;
+  CART:psl_flow) DEFAULT_SIT_STEP_1=35000; DEFAULT_SIT_STEP_2=65000 ;;
+  DroneVehicle_day:psl_flow) DEFAULT_SIT_STEP_1=70000; DEFAULT_SIT_STEP_2=100000 ;;
+  DroneVehicle_night:psl_flow) DEFAULT_SIT_STEP_1=90000; DEFAULT_SIT_STEP_2=120000 ;;
+  AVIID:klvae_sit) DEFAULT_SIT_STEP_1=45000; DEFAULT_SIT_STEP_2=45000 ;;
+  CART:klvae_sit) DEFAULT_SIT_STEP_1=35000; DEFAULT_SIT_STEP_2=35000 ;;
+  DroneVehicle_day:klvae_sit) DEFAULT_SIT_STEP_1=70000; DEFAULT_SIT_STEP_2=70000 ;;
+  DroneVehicle_night:klvae_sit) DEFAULT_SIT_STEP_1=90000; DEFAULT_SIT_STEP_2=90000 ;;
+esac
+SIT_STEP_1="${SIT_STEP_1:-${DEFAULT_SIT_STEP_1}}"
+SIT_STEP_2="${SIT_STEP_2:-${DEFAULT_SIT_STEP_2}}"
 SIT_EVAL_SPLIT="${SIT_EVAL_SPLIT:-val}"
 
 RGB_VAE_PATH="${RGB_VAE_PATH:-/root/autodl-fs/sd-vae-ft-ema}"
@@ -123,6 +150,42 @@ assert_dataset_preprocessed() {
 }
 
 assert_dataset_preprocessed
+
+dataset_train_sample_count() {
+  python - "${DATASET_NAME}" "${DATASETS_PREPROCESS_ROOT}" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+import yaml
+
+dataset, preprocess_root = sys.argv[1:]
+cfg_path = Path("psl_flow/configs/experiments/datasets") / f"{dataset}.yml"
+with cfg_path.open("r", encoding="utf-8") as handle:
+    cfg = yaml.safe_load(handle)
+total = 0
+for item in cfg.get("train", []):
+    metadata = Path(preprocess_root) / item["datafolder_name"] / "metadata.json"
+    with metadata.open("r", encoding="utf-8") as handle:
+        total += int(json.load(handle)["num_samples"])
+print(total)
+PY
+}
+
+resolve_samples_per_epoch() {
+  local value="$1" label="$2" resolved
+  if [[ "${value}" == "auto" ]]; then
+    resolved="$(dataset_train_sample_count)"
+    log_msg "Resolved ${label} num_samples_per_epoch=auto -> ${resolved}"
+    printf "%s" "${resolved}"
+  else
+    if [[ ! "${value}" =~ ^[0-9]+$ ]]; then
+      log_msg "ERR ${label} num_samples_per_epoch must be a positive integer or auto: ${value}"
+      exit 1
+    fi
+    printf "%s" "${value}"
+  fi
+}
 
 is_truthy() {
   [[ "${1:-}" =~ ^(1|true|TRUE|yes|YES|y|Y|on|ON)$ ]]
@@ -170,6 +233,13 @@ fi
 log_msg() {
   printf "[%s] %s\n" "$(date '+%F %T')" "$*" | tee -a "${RUN_LOG}"
 }
+
+TERB_NUM_SAMPLES_PER_EPOCH="$(resolve_samples_per_epoch "${TERB_NUM_SAMPLES_PER_EPOCH}" "TeR-B")"
+PSLVAE_NUM_SAMPLES_PER_EPOCH="$(resolve_samples_per_epoch "${PSLVAE_NUM_SAMPLES_PER_EPOCH}" "PSL-VAE")"
+FLOW_NUM_SAMPLES_PER_EPOCH="$(resolve_samples_per_epoch "${FLOW_NUM_SAMPLES_PER_EPOCH}" "${ROUTE}")"
+if [[ "${NORMALIZER_MAX_SAMPLES}" == "auto" ]]; then
+  NORMALIZER_MAX_SAMPLES="${PSLVAE_NUM_SAMPLES_PER_EPOCH}"
+fi
 
 hms() {
   local total="${1:-0}"
@@ -282,6 +352,114 @@ copy_latest_last_ckpt() {
   mkdir -p "$(dirname "${dst}")"
   cp "${latest}" "${dst}"
   log_msg "Copied latest checkpoint: ${latest} -> ${dst}"
+}
+
+latest_last_ckpt() {
+  local search_root="$1"
+  shopt -s globstar nullglob
+  local matches=("${search_root}"/**/last.ckpt)
+  if [[ "${#matches[@]}" -eq 0 ]]; then return 1; fi
+  ls -1t "${matches[@]}" | head -n 1
+}
+
+copy_latest_best_ckpt() {
+  local search_root="$1" dst="$2"
+  shopt -s globstar nullglob
+  local matches=("${search_root}"/**/best.ckpt)
+  if [[ "${#matches[@]}" -eq 0 ]]; then return 1; fi
+  local latest
+  latest="$(ls -1t "${matches[@]}" | head -n 1)"
+  mkdir -p "$(dirname "${dst}")"
+  cp "${latest}" "${dst}"
+  log_msg "Copied best checkpoint: ${latest} -> ${dst}"
+}
+
+select_best_or_last_ckpt() {
+  local best="$1" last="$2" dst="$3" label="$4"
+  local src=""
+  if [[ -f "${best}" ]]; then src="${best}"; else src="${last}"; fi
+  assert_file "${src}" "${label}"
+  mkdir -p "$(dirname "${dst}")"
+  cp "${src}" "${dst}"
+  log_msg "Selected ${label}: ${src} -> ${dst}"
+}
+
+select_psl_vae_ckpt() {
+  local run_root="$1" last="$2" best="$3" selected="$4" strategy="$5" epoch="$6"
+  python - "${run_root}" "${last}" "${best}" "${selected}" "${strategy}" "${epoch}" <<'PY'
+import csv
+import glob
+import os
+import shutil
+import sys
+from pathlib import Path
+
+run_root, last_ckpt, best_ckpt, selected_ckpt, strategy, epoch_arg = sys.argv[1:]
+strategy = (strategy or "best_lpips").lower()
+metric_by_strategy = {
+    "best_fid": ("val/FID", "min"),
+    "best_lpips": ("val/LPIPS", "min"),
+    "best_psnr": ("val/PSNR", "max"),
+    "best_ssim": ("val/SSIM", "max"),
+}
+
+def copy(src: str, reason: str) -> None:
+    if not src or not os.path.isfile(src):
+        raise SystemExit(f"missing selected PSL-VAE checkpoint for {reason}: {src}")
+    os.makedirs(os.path.dirname(selected_ckpt), exist_ok=True)
+    shutil.copy2(src, selected_ckpt)
+    print(f"[select-psl-vae] {reason}: {src} -> {selected_ckpt}")
+
+if strategy == "last":
+    copy(last_ckpt, "last")
+    raise SystemExit(0)
+
+if strategy == "epoch":
+    if not epoch_arg:
+        raise SystemExit("PSLVAE_EPOCH is required when PSLVAE_SELECT=epoch")
+    wanted = int(epoch_arg)
+    patterns = [
+        f"**/epoch_{wanted:04d}.ckpt",
+        f"**/epoch_{wanted - 1:04d}.ckpt",
+        f"**/*epoch={wanted}*.ckpt",
+        f"**/*epoch={wanted - 1}*.ckpt",
+    ]
+    for pattern in patterns:
+        matches = sorted(glob.glob(os.path.join(run_root, pattern), recursive=True), key=os.path.getmtime, reverse=True)
+        if matches:
+            copy(matches[0], f"epoch_{wanted}")
+            raise SystemExit(0)
+    raise SystemExit(f"no PSL-VAE checkpoint found for epoch {wanted} under {run_root}")
+
+metric_name, mode = metric_by_strategy.get(strategy, metric_by_strategy["best_lpips"])
+metrics_path = Path(run_root) / "local_logs" / "metrics.csv"
+if metrics_path.is_file():
+    best_epoch = None
+    best_value = None
+    with metrics_path.open("r", encoding="utf-8", newline="") as handle:
+        for row in csv.DictReader(handle):
+            if row.get("stage") != "val" or row.get("key") != metric_name:
+                continue
+            value = float(row["value"])
+            if best_value is None or (value < best_value if mode == "min" else value > best_value):
+                best_value = value
+                best_epoch = int(row["epoch"])
+    if best_epoch is not None:
+        for epoch in (best_epoch, best_epoch + 1):
+            matches = sorted(
+                glob.glob(os.path.join(run_root, "**", f"epoch_{epoch:04d}.ckpt"), recursive=True),
+                key=os.path.getmtime,
+                reverse=True,
+            )
+            if matches:
+                copy(matches[0], f"{strategy}:{metric_name}={best_value:.6g},epoch={best_epoch}")
+                raise SystemExit(0)
+
+if os.path.isfile(best_ckpt):
+    copy(best_ckpt, f"{strategy}:best_alias")
+else:
+    copy(last_ckpt, f"{strategy}:fallback_last")
+PY
 }
 
 copy_existing_ckpt_if_any() {
@@ -467,6 +645,56 @@ with open(out, "w", encoding="utf-8") as handle:
 PY
 }
 
+patch_training_strategy() {
+  local cfg="$1" epochs="$2" check_val_every="$3" val_check_interval="$4" checkpoint_monitor="$5" checkpoint_mode="$6" checkpoint_every_epochs="$7"
+  python - "${cfg}" "${epochs}" "${check_val_every}" "${val_check_interval}" "${checkpoint_monitor}" "${checkpoint_mode}" "${checkpoint_every_epochs}" "${GRADIENT_CLIP_VAL}" "${RUN_SEED}" "${CUDA_TF32}" "${FLOAT32_MATMUL_PRECISION}" "${NUM_SAMPLE_IMAGES}" "${NUM_SAMPLE_BATCHES}" <<'PY'
+import sys
+import yaml
+
+(
+    path,
+    epochs,
+    check_val_every,
+    val_check_interval,
+    checkpoint_monitor,
+    checkpoint_mode,
+    checkpoint_every_epochs,
+    gradient_clip,
+    seed,
+    cuda_tf32,
+    matmul_precision,
+    num_sample_images,
+    num_sample_batches,
+) = sys.argv[1:]
+with open(path, "r", encoding="utf-8") as handle:
+    cfg = yaml.safe_load(handle)
+training = cfg.setdefault("training", {})
+if epochs:
+    training["num_epochs"] = int(epochs)
+if check_val_every:
+    training["check_val_every_n_epoch"] = int(check_val_every)
+if val_check_interval:
+    training["val_check_interval"] = int(val_check_interval) if val_check_interval.isdigit() else float(val_check_interval)
+else:
+    training.pop("val_check_interval", None)
+if checkpoint_monitor:
+    training["checkpoint_monitor"] = checkpoint_monitor
+if checkpoint_mode:
+    training["checkpoint_mode"] = checkpoint_mode
+if checkpoint_every_epochs:
+    training["checkpoint_every_n_epochs"] = int(checkpoint_every_epochs)
+training["gradient_clip_val"] = float(gradient_clip)
+training["seed"] = int(seed)
+training["cuda_tf32"] = str(cuda_tf32).lower() in {"1", "true", "yes", "y", "on"}
+training["float32_matmul_precision"] = matmul_precision
+training["export_samples"] = True
+training["num_sample_images"] = int(num_sample_images)
+training["num_sample_batches"] = int(num_sample_batches)
+with open(path, "w", encoding="utf-8") as handle:
+    yaml.safe_dump(cfg, handle, sort_keys=False)
+PY
+}
+
 log_msg "Repository: ${REPO_ROOT}"
 log_msg "Dataset: ${DATASET_NAME}; route=${ROUTE}"
 log_msg "CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES}; nvidia-smi physical GPU id=${NVIDIA_SMI_GPU_ID}"
@@ -482,8 +710,12 @@ if [[ "${ROUTE}" == "psl_flow" ]]; then
   TERB_RUN="${PIPE_ROOT}/terb"
   PSLVAE_RUN="${PIPE_ROOT}/psl_vae"
   FLOW_RUN="${PIPE_ROOT}/sit_steps${SIT_STEP_2}"
-  TERB_CKPT="${PIPE_ROOT}/checkpoints/terb_last.ckpt"
-  PSLVAE_CKPT="${PIPE_ROOT}/checkpoints/psl_vae_last.ckpt"
+  TERB_LAST_CKPT="${PIPE_ROOT}/checkpoints/terb_last.ckpt"
+  TERB_BEST_CKPT="${PIPE_ROOT}/checkpoints/terb_best.ckpt"
+  TERB_CKPT="${PIPE_ROOT}/checkpoints/terb_selected.ckpt"
+  PSLVAE_LAST_CKPT="${PIPE_ROOT}/checkpoints/psl_vae_last.ckpt"
+  PSLVAE_BEST_CKPT="${PIPE_ROOT}/checkpoints/psl_vae_best.ckpt"
+  PSLVAE_CKPT="${PIPE_ROOT}/checkpoints/psl_vae_selected.ckpt"
   TERB_CFG="${ARTIFACT_ROOT}/configs/terb_${DATASET_NAME}.yml"
   PSLVAE_CFG="${ARTIFACT_ROOT}/configs/psl_vae_${DATASET_NAME}.yml"
   FLOW_CFG="${ARTIFACT_ROOT}/configs/psl_flow_${DATASET_NAME}.yml"
@@ -492,13 +724,27 @@ if [[ "${ROUTE}" == "psl_flow" ]]; then
   PSLVAE_VAL_METRICS_JSON="${ARTIFACT_ROOT}/metrics/psl_vae_final_validation_${DATASET_NAME}.json"
 
   patch_cfg_common "${TERB_BASE_CFG}" "${TERB_CFG}" "${DATASET_NAME}" "" "" "${TERB_NUM_SAMPLES_PER_EPOCH}" "psl_flow"
+  patch_training_strategy "${TERB_CFG}" "${TERB_NUM_EPOCHS}" "${TERB_VAL_EVERY_EPOCHS}" "" "val/loss_total" "min" "${TERB_VAL_EVERY_EPOCHS}"
   TERB_EXPECTED_STEPS="$(expected_fit_steps "${TERB_CFG}" "${TERB_MAX_STEPS}")"
-  if ! copy_existing_ckpt_if_any "${TERB_RUN}" "${TERB_CKPT}" "TeR-B checkpoint" "${TERB_EXPECTED_STEPS}"; then
-    TERB_CMD=(python -m psl_flow.training.train_terb --config "${TERB_CFG}" --default-root-dir "${TERB_RUN}" --devices "${PL_DEVICES_DEFAULT}" --accelerator "${PL_ACCELERATOR_DEFAULT}" --strategy "${PL_STRATEGY_DEFAULT}" --limit-val-batches 0 --check-val-every-n-epoch 999999)
+  if ! copy_existing_ckpt_if_any "${TERB_RUN}" "${TERB_LAST_CKPT}" "TeR-B last checkpoint" "${TERB_EXPECTED_STEPS}"; then
+    TERB_STAGE="terb_train"
+    TERB_VAL_ARGS=(--check-val-every-n-epoch "${TERB_VAL_EVERY_EPOCHS}")
+    if ! is_truthy "${TRAIN_WITH_VALIDATION}"; then
+      TERB_STAGE="terb_train_no_val"
+      TERB_VAL_ARGS=(--limit-val-batches 0 --check-val-every-n-epoch 999999)
+    fi
+    TERB_RESUME_ARGS=()
+    if TERB_RESUME_CKPT="$(latest_last_ckpt "${TERB_RUN}" 2>/dev/null)"; then
+      TERB_RESUME_ARGS=(--resume-from "${TERB_RESUME_CKPT}")
+      log_msg "Resume TeR-B from partial checkpoint: ${TERB_RESUME_CKPT}"
+    fi
+    TERB_CMD=(python -m psl_flow.training.train_terb --config "${TERB_CFG}" --default-root-dir "${TERB_RUN}" --devices "${PL_DEVICES_DEFAULT}" --accelerator "${PL_ACCELERATOR_DEFAULT}" --strategy "${PL_STRATEGY_DEFAULT}" "${TERB_RESUME_ARGS[@]}" "${TERB_VAL_ARGS[@]}")
     if [[ -n "${TERB_MAX_STEPS}" ]]; then TERB_CMD+=(--max-steps "${TERB_MAX_STEPS}"); fi
-    run_stage "${ROUTE}" "terb_train_no_val" "" "${TERB_CKPT}" "${TERB_CMD[@]}"
-    copy_latest_last_ckpt "${TERB_RUN}" "${TERB_CKPT}"
+    run_stage "${ROUTE}" "${TERB_STAGE}" "" "${TERB_LAST_CKPT}" "${TERB_CMD[@]}"
+    copy_latest_last_ckpt "${TERB_RUN}" "${TERB_LAST_CKPT}"
   fi
+  copy_latest_best_ckpt "${TERB_RUN}" "${TERB_BEST_CKPT}" || true
+  select_best_or_last_ckpt "${TERB_BEST_CKPT}" "${TERB_LAST_CKPT}" "${TERB_CKPT}" "TeR-B selected checkpoint"
   assert_file "${TERB_CKPT}" "TeR-B checkpoint"
   if should_run_validation "${TERB_VAL_METRICS_JSON}"; then
     run_stage "${ROUTE}" "terb_final_validation" "" "${TERB_CKPT}" \
@@ -509,12 +755,30 @@ if [[ "${ROUTE}" == "psl_flow" ]]; then
   fi
 
   patch_cfg_common "${PSLVAE_BASE_CFG}" "${PSLVAE_CFG}" "${DATASET_NAME}" "${TERB_CKPT}" "" "${PSLVAE_NUM_SAMPLES_PER_EPOCH}" "psl_flow"
+  patch_training_strategy "${PSLVAE_CFG}" "${PSLVAE_NUM_EPOCHS}" "${PSLVAE_VAL_EVERY_EPOCHS}" "" "${PSLVAE_CHECKPOINT_MONITOR}" "min" "${PSLVAE_VAL_EVERY_EPOCHS}"
   PSLVAE_EXPECTED_STEPS="$(expected_fit_steps "${PSLVAE_CFG}" "${PSLVAE_MAX_STEPS}")"
-  if ! copy_existing_ckpt_if_any "${PSLVAE_RUN}" "${PSLVAE_CKPT}" "PSL-VAE checkpoint" "${PSLVAE_EXPECTED_STEPS}"; then
-    PSLVAE_CMD=(python -m psl_flow.training.train_psl_vae --config "${PSLVAE_CFG}" --default-root-dir "${PSLVAE_RUN}" --devices "${PL_DEVICES_DEFAULT}" --accelerator "${PL_ACCELERATOR_DEFAULT}" --strategy "${PL_STRATEGY_DEFAULT}" --limit-val-batches 0 --check-val-every-n-epoch 999999)
+  if ! copy_existing_ckpt_if_any "${PSLVAE_RUN}" "${PSLVAE_LAST_CKPT}" "PSL-VAE last checkpoint" "${PSLVAE_EXPECTED_STEPS}"; then
+    PSLVAE_STAGE="psl_vae_train"
+    PSLVAE_VAL_ARGS=(--check-val-every-n-epoch "${PSLVAE_VAL_EVERY_EPOCHS}")
+    if ! is_truthy "${TRAIN_WITH_VALIDATION}"; then
+      PSLVAE_STAGE="psl_vae_train_no_val"
+      PSLVAE_VAL_ARGS=(--limit-val-batches 0 --check-val-every-n-epoch 999999)
+    fi
+    PSLVAE_RESUME_ARGS=()
+    if PSLVAE_RESUME_CKPT="$(latest_last_ckpt "${PSLVAE_RUN}" 2>/dev/null)"; then
+      PSLVAE_RESUME_ARGS=(--resume-from "${PSLVAE_RESUME_CKPT}")
+      log_msg "Resume PSL-VAE from partial checkpoint: ${PSLVAE_RESUME_CKPT}"
+    fi
+    PSLVAE_CMD=(python -m psl_flow.training.train_psl_vae --config "${PSLVAE_CFG}" --default-root-dir "${PSLVAE_RUN}" --devices "${PL_DEVICES_DEFAULT}" --accelerator "${PL_ACCELERATOR_DEFAULT}" --strategy "${PL_STRATEGY_DEFAULT}" "${PSLVAE_RESUME_ARGS[@]}" "${PSLVAE_VAL_ARGS[@]}")
     if [[ -n "${PSLVAE_MAX_STEPS}" ]]; then PSLVAE_CMD+=(--max-steps "${PSLVAE_MAX_STEPS}"); fi
-    run_stage "${ROUTE}" "psl_vae_train_no_val" "" "${PSLVAE_CKPT}" "${PSLVAE_CMD[@]}"
-    copy_latest_last_ckpt "${PSLVAE_RUN}" "${PSLVAE_CKPT}"
+    run_stage "${ROUTE}" "${PSLVAE_STAGE}" "" "${PSLVAE_LAST_CKPT}" "${PSLVAE_CMD[@]}"
+    copy_latest_last_ckpt "${PSLVAE_RUN}" "${PSLVAE_LAST_CKPT}"
+  fi
+  copy_latest_best_ckpt "${PSLVAE_RUN}" "${PSLVAE_BEST_CKPT}" || true
+  if is_truthy "${TRAIN_WITH_VALIDATION}"; then
+    select_psl_vae_ckpt "${PSLVAE_RUN}" "${PSLVAE_LAST_CKPT}" "${PSLVAE_BEST_CKPT}" "${PSLVAE_CKPT}" "${PSLVAE_SELECT}" "${PSLVAE_EPOCH}"
+  else
+    select_psl_vae_ckpt "${PSLVAE_RUN}" "${PSLVAE_LAST_CKPT}" "${PSLVAE_BEST_CKPT}" "${PSLVAE_CKPT}" "last" ""
   fi
   assert_file "${PSLVAE_CKPT}" "PSL-VAE checkpoint"
   if should_run_validation "${PSLVAE_VAL_METRICS_JSON}"; then
@@ -529,6 +793,7 @@ if [[ "${ROUTE}" == "psl_flow" ]]; then
     log_msg "Skip latent stats; config already has thermal_normalizer: ${FLOW_CFG}"
   else
     patch_cfg_common "${FLOW_BASE_CFG}" "${FLOW_CFG}" "${DATASET_NAME}" "${TERB_CKPT}" "${PSLVAE_CKPT}" "${FLOW_NUM_SAMPLES_PER_EPOCH}" "psl_flow"
+    patch_training_strategy "${FLOW_CFG}" "" "0" "${FLOW_VAL_EVERY_STEPS}" "${FLOW_CHECKPOINT_MONITOR}" "min" ""
     run_stage "${ROUTE}" "psl_vae_latent_stats_patch_config" "" "${FLOW_STATS_JSON}" \
       python -m psl_flow.models.psl_vae.prepare_psl_flow_config \
         --flow-config "${FLOW_CFG}" --output-flow-config "${FLOW_CFG}" \
@@ -550,10 +815,12 @@ else
     exit 1
   fi
   patch_cfg_common "${FLOW_BASE_CFG}" "${FLOW_CFG}" "${DATASET_NAME}" "" "" "${FLOW_NUM_SAMPLES_PER_EPOCH}" "klvae_sit"
+  patch_training_strategy "${FLOW_CFG}" "" "0" "${FLOW_VAL_EVERY_STEPS}" "${FLOW_CHECKPOINT_MONITOR}" "min" ""
 fi
 
 printf -v FLOW_STEP1 "%s/checkpoints/step_%06d.ckpt" "${FLOW_RUN}" "${SIT_STEP_1}"
 printf -v FLOW_STEP2 "%s/checkpoints/step_%06d.ckpt" "${FLOW_RUN}" "${SIT_STEP_2}"
+FLOW_STEP1_METRICS_JSON="${ARTIFACT_ROOT}/metrics/${ROUTE}_step_${SIT_STEP_1}_${SIT_EVAL_SPLIT}_${DATASET_NAME}.json"
 FLOW_VAL_METRICS_JSON="${ARTIFACT_ROOT}/metrics/${ROUTE}_final_${SIT_EVAL_SPLIT}_${DATASET_NAME}.json"
 
 SIT_START_TS="$(date +%s)"
@@ -563,41 +830,75 @@ if [[ -f "${FLOW_STEP2}" ]]; then
 elif copy_existing_ckpt_at_or_after_step "${FLOW_RUN}" "${FLOW_STEP1}" "${SIT_STEP_1}" "${ROUTE} step ${SIT_STEP_1} checkpoint"; then
   log_msg "Reuse existing ${ROUTE} step ${SIT_STEP_1} checkpoint: ${FLOW_STEP1}"
 else
-  run_stage "${ROUTE}" "sit_train_to_${SIT_STEP_1}_no_val" "${SIT_STEP_1}" "${FLOW_STEP1}" \
+  FLOW_STAGE1="sit_train_to_${SIT_STEP_1}"
+  FLOW_VAL_ARGS=(--check-val-every-n-epoch 0 --val-check-interval "${FLOW_VAL_EVERY_STEPS}")
+  if ! is_truthy "${TRAIN_WITH_VALIDATION}"; then
+    FLOW_STAGE1="sit_train_to_${SIT_STEP_1}_no_val"
+    FLOW_VAL_ARGS=(--limit-val-batches 0 --check-val-every-n-epoch 999999)
+  fi
+  FLOW_RESUME_ARGS=()
+  if FLOW_RESUME_CKPT="$(latest_last_ckpt "${FLOW_RUN}" 2>/dev/null)"; then
+    FLOW_RESUME_ARGS=(--resume-from "${FLOW_RESUME_CKPT}")
+    log_msg "Resume ${ROUTE} toward step ${SIT_STEP_1} from partial checkpoint: ${FLOW_RESUME_CKPT}"
+  fi
+  run_stage "${ROUTE}" "${FLOW_STAGE1}" "${SIT_STEP_1}" "${FLOW_STEP1}" \
     python -m psl_flow.training.train_psl_flow --config "${FLOW_CFG}" --mode fit \
       --default-root-dir "${FLOW_RUN}" --devices "${PL_DEVICES_DEFAULT}" \
       --accelerator "${PL_ACCELERATOR_DEFAULT}" --strategy "${PL_STRATEGY_DEFAULT}" \
-      --max-steps "${SIT_STEP_1}" --checkpoint-every-n-train-steps "${SIT_STEP_1}" \
-      --limit-val-batches 0 --check-val-every-n-epoch 999999
+      "${FLOW_RESUME_ARGS[@]}" \
+      --max-steps "${SIT_STEP_1}" --checkpoint-every-n-train-steps "${SIT_CHECKPOINT_EVERY_STEPS}" \
+      "${FLOW_VAL_ARGS[@]}"
   copy_latest_last_ckpt "${FLOW_RUN}" "${FLOW_STEP1}"
   SIT_PEAK="${RESULT_PEAK_GPU_MIB}"
   SIT_CUM="$(( $(date +%s) - SIT_START_TS ))"
-  append_summary "${ROUTE}" "sit_cumulative_to_${SIT_STEP_1}" "${SIT_STEP_1}" "${SIT_CUM}" "${SIT_PEAK}" "${BENCH_ROOT}/logs/${ROUTE}_sit_train_to_${SIT_STEP_1}_no_val.log" "${FLOW_STEP1}"
+  append_summary "${ROUTE}" "sit_cumulative_to_${SIT_STEP_1}" "${SIT_STEP_1}" "${SIT_CUM}" "${SIT_PEAK}" "${BENCH_ROOT}/logs/${ROUTE}_${FLOW_STAGE1}.log" "${FLOW_STEP1}"
 fi
 if [[ ! -f "${FLOW_STEP2}" ]]; then
   assert_file "${FLOW_STEP1}" "${ROUTE} step ${SIT_STEP_1}"
 fi
 
-if copy_existing_ckpt_at_or_after_step "${FLOW_RUN}" "${FLOW_STEP2}" "${SIT_STEP_2}" "${ROUTE} step ${SIT_STEP_2} checkpoint"; then
-  log_msg "Reuse existing ${ROUTE} step ${SIT_STEP_2} checkpoint: ${FLOW_STEP2}"
-else
-  run_stage "${ROUTE}" "sit_resume_to_${SIT_STEP_2}_no_val" "${SIT_STEP_2}" "${FLOW_STEP2}" \
-    python -m psl_flow.training.train_psl_flow --config "${FLOW_CFG}" --mode fit \
-      --default-root-dir "${FLOW_RUN}" --devices "${PL_DEVICES_DEFAULT}" \
-      --accelerator "${PL_ACCELERATOR_DEFAULT}" --strategy "${PL_STRATEGY_DEFAULT}" \
-      --resume-from "${FLOW_STEP1}" --max-steps "${SIT_STEP_2}" \
-      --limit-val-batches 0 --check-val-every-n-epoch 999999
-  copy_latest_last_ckpt "${FLOW_RUN}" "${FLOW_STEP2}"
-  SIT_PEAK="$(max_int "${SIT_PEAK}" "${RESULT_PEAK_GPU_MIB}")"
-  SIT_CUM="$(( $(date +%s) - SIT_START_TS ))"
-  append_summary "${ROUTE}" "sit_cumulative_to_${SIT_STEP_2}" "${SIT_STEP_2}" "${SIT_CUM}" "${SIT_PEAK}" "${BENCH_ROOT}/logs/${ROUTE}_sit_resume_to_${SIT_STEP_2}_no_val.log" "${FLOW_STEP2}"
-fi
-assert_file "${FLOW_STEP2}" "${ROUTE} step ${SIT_STEP_2}"
-
 EVAL_MODE="test"
 if [[ "${SIT_EVAL_SPLIT}" == "val" ]]; then
   EVAL_MODE="validate"
 fi
+
+if [[ -f "${FLOW_STEP1}" && "${SIT_STEP_1}" != "${SIT_STEP_2}" ]] && should_run_validation "${FLOW_STEP1_METRICS_JSON}"; then
+  run_stage "${ROUTE}" "validation_${SIT_EVAL_SPLIT}_step_${SIT_STEP_1}" "${SIT_STEP_1}" "${FLOW_STEP1}" \
+    python -m psl_flow.training.train_psl_flow --config "${FLOW_CFG}" --mode "${EVAL_MODE}" \
+      --ckpt "${FLOW_STEP1}" --metrics-json "${FLOW_STEP1_METRICS_JSON}" \
+      --default-root-dir "${FLOW_RUN}" --devices "${PL_DEVICES_DEFAULT}" \
+      --accelerator "${PL_ACCELERATOR_DEFAULT}" --strategy "${PL_STRATEGY_DEFAULT}"
+fi
+
+if copy_existing_ckpt_at_or_after_step "${FLOW_RUN}" "${FLOW_STEP2}" "${SIT_STEP_2}" "${ROUTE} step ${SIT_STEP_2} checkpoint"; then
+  log_msg "Reuse existing ${ROUTE} step ${SIT_STEP_2} checkpoint: ${FLOW_STEP2}"
+else
+  FLOW_STAGE2="sit_resume_to_${SIT_STEP_2}"
+  FLOW_VAL_ARGS=(--check-val-every-n-epoch 0 --val-check-interval "${FLOW_VAL_EVERY_STEPS}")
+  if ! is_truthy "${TRAIN_WITH_VALIDATION}"; then
+    FLOW_STAGE2="sit_resume_to_${SIT_STEP_2}_no_val"
+    FLOW_VAL_ARGS=(--limit-val-batches 0 --check-val-every-n-epoch 999999)
+  fi
+  FLOW_STAGE2_RESUME="${FLOW_STEP1}"
+  if FLOW_RESUME_CKPT="$(latest_last_ckpt "${FLOW_RUN}" 2>/dev/null)" \
+    && checkpoint_reaches_step "${FLOW_RESUME_CKPT}" "${SIT_STEP_1}" \
+    && ! checkpoint_reaches_step "${FLOW_RESUME_CKPT}" "${SIT_STEP_2}"; then
+    FLOW_STAGE2_RESUME="${FLOW_RESUME_CKPT}"
+    log_msg "Resume ${ROUTE} toward step ${SIT_STEP_2} from partial checkpoint: ${FLOW_RESUME_CKPT}"
+  fi
+  run_stage "${ROUTE}" "${FLOW_STAGE2}" "${SIT_STEP_2}" "${FLOW_STEP2}" \
+    python -m psl_flow.training.train_psl_flow --config "${FLOW_CFG}" --mode fit \
+      --default-root-dir "${FLOW_RUN}" --devices "${PL_DEVICES_DEFAULT}" \
+      --accelerator "${PL_ACCELERATOR_DEFAULT}" --strategy "${PL_STRATEGY_DEFAULT}" \
+      --resume-from "${FLOW_STAGE2_RESUME}" --max-steps "${SIT_STEP_2}" \
+      --checkpoint-every-n-train-steps "${SIT_CHECKPOINT_EVERY_STEPS}" \
+      "${FLOW_VAL_ARGS[@]}"
+  copy_latest_last_ckpt "${FLOW_RUN}" "${FLOW_STEP2}"
+  SIT_PEAK="$(max_int "${SIT_PEAK}" "${RESULT_PEAK_GPU_MIB}")"
+  SIT_CUM="$(( $(date +%s) - SIT_START_TS ))"
+  append_summary "${ROUTE}" "sit_cumulative_to_${SIT_STEP_2}" "${SIT_STEP_2}" "${SIT_CUM}" "${SIT_PEAK}" "${BENCH_ROOT}/logs/${ROUTE}_${FLOW_STAGE2}.log" "${FLOW_STEP2}"
+fi
+assert_file "${FLOW_STEP2}" "${ROUTE} step ${SIT_STEP_2}"
 
 if should_run_validation "${FLOW_VAL_METRICS_JSON}"; then
   run_stage "${ROUTE}" "final_validation_${SIT_EVAL_SPLIT}" "" "${FLOW_STEP2}" \

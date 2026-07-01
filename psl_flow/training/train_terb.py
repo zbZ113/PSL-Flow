@@ -12,6 +12,11 @@ import yaml
 from psl_flow.data import build_data_module, thermal_to_01
 from psl_flow.models.terb.losses import TeRBLoss
 from psl_flow.models.terb.terb import TeRB
+from psl_flow.training.callbacks import (
+    build_management_callbacks,
+    configure_training_runtime,
+    copy_best_checkpoint_alias,
+)
 
 
 class TeRBLightningModule(pl.LightningModule):
@@ -44,7 +49,24 @@ class TeRBLightningModule(pl.LightningModule):
         return self._step(batch, "train")
 
     def validation_step(self, batch, batch_idx):
-        self._step(batch, "val")
+        thermal_01 = thermal_to_01(batch[1])
+        outputs = self(thermal_01)
+        losses = self.loss_fn(outputs)
+        self.log("val/loss_total", losses["loss_total"], prog_bar=True, sync_dist=True)
+        self.log("val/loss_ter", losses["loss_ter"], sync_dist=True)
+        self.log("val/loss_b", losses["loss_b"], sync_dist=True)
+        self.log("val/s_phys_mean", losses["s_phys_mean"], sync_dist=True)
+        self.log("val/s_phys_std", losses["s_phys_std"], sync_dist=True)
+        self.log("val/b_mean", losses["b_mean"], sync_dist=True)
+        self.log("val/b_std", losses["b_std"], sync_dist=True)
+        return {
+            "S": thermal_01,
+            "e": outputs["e"],
+            "T": outputs["T_rad"],
+            "R_env": outputs["R_env"],
+            "B": outputs["B_edge"],
+            "S_phys": outputs["S_phys"],
+        }
 
     def configure_optimizers(self):
         lr = float(self.optimizer_cfg.get("lr", 1e-4))
@@ -85,6 +107,7 @@ def main() -> None:
     parser.add_argument("--accelerator", default="gpu")
     parser.add_argument("--strategy", default="auto")
     parser.add_argument("--max-steps", type=int, default=None)
+    parser.add_argument("--resume-from", default=None)
     parser.add_argument("--ckpt", default=None)
     parser.add_argument("--metrics-json", default=None)
     parser.add_argument("--limit-val-batches", type=float, default=None)
@@ -92,19 +115,37 @@ def main() -> None:
     args = parser.parse_args()
 
     config = load_yaml(args.config)
-    data = build_data_module(config)
     training = dict(config.get("training", {}))
-    callbacks = []
+    configure_training_runtime(training)
+    data = build_data_module(config)
+    monitor = str(training.get("checkpoint_monitor", "val/loss_total"))
+    mode = str(training.get("checkpoint_mode", "min"))
+    limit_val_batches = args.limit_val_batches if args.limit_val_batches is not None else training.get("limit_val_batches", None)
+    validation_disabled = limit_val_batches == 0
+    callbacks = build_management_callbacks(training, root_dir=args.default_root_dir, monitor=monitor, mode=mode)
     if args.mode == "fit":
         callbacks.append(
             pl.callbacks.ModelCheckpoint(
                 dirpath=None,
                 save_last=True,
-                monitor=str(training.get("checkpoint_monitor", "val/loss_total")),
-                mode=str(training.get("checkpoint_mode", "min")),
-                save_top_k=int(training.get("checkpoint_save_top_k", 1)),
+                monitor=None if validation_disabled else monitor,
+                mode=mode,
+                save_top_k=0 if validation_disabled else int(training.get("checkpoint_save_top_k", 1)),
+                filename="best",
+                auto_insert_metric_name=False,
             )
         )
+        every_n_epochs = int(training.get("checkpoint_every_n_epochs", 0) or 0)
+        if every_n_epochs > 0 and not validation_disabled:
+            callbacks.append(
+                pl.callbacks.ModelCheckpoint(
+                    dirpath=None,
+                    save_top_k=-1,
+                    every_n_epochs=every_n_epochs,
+                    filename="epoch_{epoch:04d}",
+                    auto_insert_metric_name=False,
+                )
+            )
     trainer = pl.Trainer(
         max_epochs=int(training.get("num_epochs", 100)),
         max_steps=args.max_steps if args.max_steps is not None else int(training.get("max_steps", -1)),
@@ -115,23 +156,23 @@ def main() -> None:
         precision="16-mixed" if bool(training.get("mixed_precision", False)) else "32-true",
         callbacks=callbacks,
         logger=False if bool(training.get("disable_logger", False)) else True,
-        limit_val_batches=args.limit_val_batches
-        if args.limit_val_batches is not None
-        else training.get("limit_val_batches", None),
+        limit_val_batches=limit_val_batches,
         check_val_every_n_epoch=args.check_val_every_n_epoch
         if args.check_val_every_n_epoch is not None
         else int(training.get("check_val_every_n_epoch", 1)),
         accumulate_grad_batches=int(training.get("gradient_accumulation", 1)),
         log_every_n_steps=int(training.get("log_every_n_steps", 50)),
+        gradient_clip_val=float(training.get("gradient_clip_val", 0.0) or 0.0),
     )
     module = TeRBLightningModule(config)
     if args.mode == "fit":
-        trainer.fit(module, datamodule=data)
+        trainer.fit(module, datamodule=data, ckpt_path=args.resume_from)
         if trainer.is_global_zero:
             final_ckpt = Path(args.default_root_dir or trainer.default_root_dir) / "checkpoints" / "last.ckpt"
             final_ckpt.parent.mkdir(parents=True, exist_ok=True)
             trainer.save_checkpoint(str(final_ckpt))
             print(f"[TeR-B] saved final checkpoint: {final_ckpt}")
+            copy_best_checkpoint_alias(callbacks, Path(args.default_root_dir or trainer.default_root_dir))
     else:
         results = trainer.validate(module, datamodule=data, ckpt_path=args.ckpt)
         if trainer.is_global_zero:

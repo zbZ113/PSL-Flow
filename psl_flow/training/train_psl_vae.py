@@ -10,8 +10,14 @@ import torch
 import yaml
 
 from psl_flow.data import build_data_module, thermal_to_01
+from psl_flow.evaluation.metrics import psnr_per_sample, ssim_per_sample
 from psl_flow.models.psl_vae.losses import PSLVAELoss
 from psl_flow.models.psl_vae.psl_vae import PSLVAE, build_terb_teacher
+from psl_flow.training.callbacks import (
+    build_management_callbacks,
+    configure_training_runtime,
+    copy_best_checkpoint_alias,
+)
 from psl_flow.utils.checkpoint import load_state_dict_flexible
 
 
@@ -54,7 +60,30 @@ class PSLVAELightningModule(pl.LightningModule):
         return self._step(batch, "train")
 
     def validation_step(self, batch, batch_idx):
-        self._step(batch, "val")
+        thermal_01 = thermal_to_01(batch[1])
+        outputs = self(thermal_01)
+        losses = self.loss_fn(outputs, thermal_01)
+        self.log("val/loss_total", losses["loss_total"], prog_bar=True, sync_dist=True)
+        for key, value in losses.items():
+            if key != "loss_total":
+                self.log(f"val/{key}", value, sync_dist=True)
+        self.log("val/PSNR", psnr_per_sample(outputs["y_hat"], thermal_01).mean(), sync_dist=True)
+        self.log("val/SSIM", ssim_per_sample(outputs["y_hat"], thermal_01).mean(), sync_dist=True)
+        self.log("val/LPIPS", losses["loss_perc"], sync_dist=True)
+        self.log("val/latent_std", outputs["z_phys"].std(unbiased=False), sync_dist=True)
+        self.log("val/latent_mean", outputs["z_phys"].mean(), sync_dist=True)
+        targets = outputs["targets"]
+        return {
+            "GT": thermal_01,
+            "S_phys": outputs["S_phys"],
+            "recon": outputs["y_hat"],
+            "T": outputs["T_rad"],
+            "e": outputs["e"],
+            "R_env": outputs["R_env"],
+            "B": outputs["B_edge"],
+            "delta": outputs["delta_res"],
+            "target_S_phys": targets["S_phys"],
+        }
 
     def configure_optimizers(self):
         lr = float(self.optimizer_cfg.get("lr", 6e-5))
@@ -104,22 +133,40 @@ def main() -> None:
     args = parser.parse_args()
 
     config = load_yaml(args.config)
-    data = build_data_module(config)
     training = dict(config.get("training", {}))
+    configure_training_runtime(training)
+    data = build_data_module(config)
     module = PSLVAELightningModule(config)
     if args.load:
         print(load_state_dict_flexible(module.model, args.load, strict=False, strip_prefixes=("model.", "module.", "psl_vae.")))
-    callbacks = []
+    monitor = str(training.get("checkpoint_monitor", "val/LPIPS"))
+    mode = str(training.get("checkpoint_mode", "min"))
+    limit_val_batches = args.limit_val_batches if args.limit_val_batches is not None else training.get("limit_val_batches", None)
+    validation_disabled = limit_val_batches == 0
+    callbacks = build_management_callbacks(training, root_dir=args.default_root_dir, monitor=monitor, mode=mode)
     if args.mode == "fit":
         callbacks.append(
             pl.callbacks.ModelCheckpoint(
                 dirpath=None,
                 save_last=True,
-                monitor=str(training.get("checkpoint_monitor", "val/loss_total")),
-                mode=str(training.get("checkpoint_mode", "min")),
-                save_top_k=int(training.get("checkpoint_save_top_k", 1)),
+                monitor=None if validation_disabled else monitor,
+                mode=mode,
+                save_top_k=0 if validation_disabled else int(training.get("checkpoint_save_top_k", 1)),
+                filename="best",
+                auto_insert_metric_name=False,
             )
         )
+        every_n_epochs = int(training.get("checkpoint_every_n_epochs", 0) or 0)
+        if every_n_epochs > 0 and not validation_disabled:
+            callbacks.append(
+                pl.callbacks.ModelCheckpoint(
+                    dirpath=None,
+                    save_top_k=-1,
+                    every_n_epochs=every_n_epochs,
+                    filename="epoch_{epoch:04d}",
+                    auto_insert_metric_name=False,
+                )
+            )
     trainer = pl.Trainer(
         max_epochs=int(training.get("num_epochs", 100)),
         max_steps=args.max_steps if args.max_steps is not None else int(training.get("max_steps", -1)),
@@ -130,14 +177,13 @@ def main() -> None:
         precision="16-mixed" if bool(training.get("mixed_precision", False)) else "32-true",
         callbacks=callbacks,
         logger=False if bool(training.get("disable_logger", False)) else True,
-        limit_val_batches=args.limit_val_batches
-        if args.limit_val_batches is not None
-        else training.get("limit_val_batches", None),
+        limit_val_batches=limit_val_batches,
         check_val_every_n_epoch=args.check_val_every_n_epoch
         if args.check_val_every_n_epoch is not None
         else int(training.get("check_val_every_n_epoch", 1)),
         accumulate_grad_batches=int(training.get("gradient_accumulation", 1)),
         log_every_n_steps=int(training.get("log_every_n_steps", 50)),
+        gradient_clip_val=float(training.get("gradient_clip_val", 0.0) or 0.0),
     )
     if args.mode == "fit":
         trainer.fit(module, datamodule=data, ckpt_path=args.resume_from)
@@ -146,6 +192,7 @@ def main() -> None:
             final_ckpt.parent.mkdir(parents=True, exist_ok=True)
             trainer.save_checkpoint(str(final_ckpt))
             print(f"[PSL-VAE] saved final checkpoint: {final_ckpt}")
+            copy_best_checkpoint_alias(callbacks, Path(args.default_root_dir or trainer.default_root_dir))
     else:
         results = trainer.validate(module, datamodule=data, ckpt_path=args.ckpt)
         if trainer.is_global_zero:

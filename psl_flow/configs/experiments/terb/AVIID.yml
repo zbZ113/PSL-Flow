@@ -17,7 +17,7 @@ datasets:
   target_val_dataset: AVIID
 
 training:
-  num_epochs: 300
+  num_epochs: 200
   max_steps: -1
   num_samples_per_epoch: 2412
   train_batch_size: 16
@@ -35,10 +35,18 @@ training:
       beta: 0.1
   mixed_precision: false
   gradient_accumulation: 1
-  check_val_every_n_epoch: 10
+  gradient_clip_val: 1.0
+  check_val_every_n_epoch: 20
   limit_val_batches:
   checkpoint_monitor: val/loss_total
   checkpoint_mode: min
   checkpoint_save_top_k: 1
+  checkpoint_every_n_epochs: 20
   disable_logger: false
   log_every_n_steps: 50
+  seed: 1234
+  cuda_tf32: true
+  float32_matmul_precision: high
+  export_samples: true
+  num_sample_images: 4
+  num_sample_batches: 1
