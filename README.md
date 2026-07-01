@@ -146,6 +146,15 @@ logs/experiments/<dataset>/psl_flow/<run_id>/artifacts/metrics/
 }
 ```
 
+## Acknowledgements
+
+This project builds on and is inspired by the following open-source projects:
+
+- [CompVis/latent-diffusion](https://github.com/CompVis/latent-diffusion)
+- [willisma/SiT](https://github.com/willisma/SiT)
+- [arplaboratory/ThermalGen](https://github.com/arplaboratory/ThermalGen)
+- [fangyuanmao/PID](https://github.com/fangyuanmao/PID)
+
 ## License
 
 This repository is released under the MIT License. The bundled SiT transport/network files retain their upstream license in `psl_flow/models/sit/LICENSE`.
