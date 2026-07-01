@@ -178,6 +178,19 @@ def _make_fid_metric(enabled: bool, label: str) -> nn.Module | None:
         return None
 
 
+def _is_optional_eval_state_key(key: str) -> bool:
+    return key.startswith(("val_fid.", "test_fid.", "eval_lpips."))
+
+
+def _format_incompatible_keys(missing: list[str], unexpected: list[str]) -> str:
+    chunks = []
+    if missing:
+        chunks.append("Missing key(s): " + ", ".join(missing[:20]) + (" ..." if len(missing) > 20 else ""))
+    if unexpected:
+        chunks.append("Unexpected key(s): " + ", ".join(unexpected[:20]) + (" ..." if len(unexpected) > 20 else ""))
+    return "; ".join(chunks)
+
+
 def _update_fid_metric(metric: nn.Module | None, pred: torch.Tensor, target: torch.Tensor) -> None:
     if metric is None:
         return
@@ -310,6 +323,24 @@ class PSLFlowLightningModule(pl.LightningModule):
         self.eval_efficiency = bool(config.get("training", {}).get("eval_efficiency", False) or model_cfg.get("eval_efficiency", False))
         self._efficiency_stats: dict[str, dict[str, float | int | None]] = {}
         self.optimizer_cfg = dict(config.get("training", {}).get("optimizer", {"name": "AdamW", "lr": 1e-4, "weight_decay": 0.0}))
+
+    def load_state_dict(self, state_dict, strict: bool = True):
+        incompatible = super().load_state_dict(state_dict, strict=False)
+        missing = [key for key in incompatible.missing_keys if not _is_optional_eval_state_key(key)]
+        unexpected = [key for key in incompatible.unexpected_keys if not _is_optional_eval_state_key(key)]
+        if strict and (missing or unexpected):
+            raise RuntimeError(
+                f"Error(s) in loading state_dict for {self.__class__.__name__}: "
+                f"{_format_incompatible_keys(missing, unexpected)}"
+            )
+        ignored_missing = len(incompatible.missing_keys) - len(missing)
+        ignored_unexpected = len(incompatible.unexpected_keys) - len(unexpected)
+        if ignored_missing or ignored_unexpected:
+            print(
+                "[checkpoint][WARN] ignored optional eval metric state mismatch: "
+                f"missing={ignored_missing}, unexpected={ignored_unexpected}"
+            )
+        return incompatible
 
     def configure_optimizers(self):
         return torch.optim.AdamW(
@@ -534,6 +565,24 @@ class KLVaeSiTLightningModule(pl.LightningModule):
         self.eval_efficiency = bool(config.get("training", {}).get("eval_efficiency", False) or model_cfg.get("eval_efficiency", False))
         self._efficiency_stats: dict[str, dict[str, float | int | None]] = {}
         self.optimizer_cfg = dict(config.get("training", {}).get("optimizer", {"name": "AdamW", "lr": 1e-4, "weight_decay": 0.0}))
+
+    def load_state_dict(self, state_dict, strict: bool = True):
+        incompatible = super().load_state_dict(state_dict, strict=False)
+        missing = [key for key in incompatible.missing_keys if not _is_optional_eval_state_key(key)]
+        unexpected = [key for key in incompatible.unexpected_keys if not _is_optional_eval_state_key(key)]
+        if strict and (missing or unexpected):
+            raise RuntimeError(
+                f"Error(s) in loading state_dict for {self.__class__.__name__}: "
+                f"{_format_incompatible_keys(missing, unexpected)}"
+            )
+        ignored_missing = len(incompatible.missing_keys) - len(missing)
+        ignored_unexpected = len(incompatible.unexpected_keys) - len(unexpected)
+        if ignored_missing or ignored_unexpected:
+            print(
+                "[checkpoint][WARN] ignored optional eval metric state mismatch: "
+                f"missing={ignored_missing}, unexpected={ignored_unexpected}"
+            )
+        return incompatible
 
     def configure_optimizers(self):
         return torch.optim.AdamW(
