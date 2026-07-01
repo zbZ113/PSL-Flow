@@ -412,6 +412,7 @@ patch_cfg_common() {
   python - "${base}" "${out}" "${dataset}" "${teacher_ckpt}" "${psl_vae_ckpt}" "${RGB_VAE_PATH}" "${RGB_VAE_REPO}" "${RGB_VAE_LOCAL_FILES_ONLY}" "${TRAIN_BATCH_SIZE_DEFAULT}" "${TEST_BATCH_SIZE_DEFAULT}" "${NUM_WORKERS_DEFAULT}" "${samples_per_epoch}" "${MIXED_PRECISION}" "${route}" "${THERMAL_KLVAE_CKPT}" "${THERMAL_KLVAE_NORMALIZER}" <<'PY'
 import sys
 import yaml
+import os
 
 (
     base,

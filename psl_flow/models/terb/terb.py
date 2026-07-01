@@ -61,6 +61,7 @@ class TeRB(nn.Module):
 
         s_phys = torch.clamp(e * t_rad + (1.0 - e) * r_env, 0.0, 1.0)
         return {
+            "T": t_rad,
             "T_rad": t_rad,
             "e": e,
             "R_env": r_env,
@@ -68,6 +69,7 @@ class TeRB(nn.Module):
             "R_env_local": r_env_local,
             "V4": v4,
             "B_edge_logits": h_b,
+            "B": b_edge,
             "B_edge": b_edge,
             "S_phys": s_phys,
             "S_01": s_01,

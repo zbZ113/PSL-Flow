@@ -1,4 +1,4 @@
-dataset_index: 22
+dataset_index: 0
 train:
   - datafolder_name: AVIID/train
 val:

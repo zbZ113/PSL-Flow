@@ -1,4 +1,4 @@
-dataset_index: 24
+dataset_index: 2
 train:
   - datafolder_name: DroneVehicle/train/day
 val:

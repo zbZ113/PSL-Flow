@@ -26,7 +26,9 @@ def test_terb_fake_forward(monkeypatch):
     monkeypatch.setattr(terb_module, "SMPWrapper", DummyBackbone)
     model = terb_module.TeRB()
     out = model(torch.rand(1, 1, 256, 256))
-    assert {"e", "T_rad", "R_env", "B_edge", "B_edge_logits", "S_phys", "S_01"}.issubset(out)
+    assert {"e", "T", "T_rad", "R_env", "B", "B_edge", "B_edge_logits", "S_phys", "S_01"}.issubset(out)
+    assert out["T"] is out["T_rad"]
+    assert out["B"] is out["B_edge"]
     assert out["S_phys"].shape == (1, 1, 256, 256)
     assert chr(65) not in out
 
