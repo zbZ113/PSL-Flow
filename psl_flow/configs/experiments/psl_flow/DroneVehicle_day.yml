@@ -11,7 +11,7 @@ model:
     psl_vae_ckpt: ""
     rgb_vae_path: ""
     rgb_vae_repo: stabilityai/sd-vae-ft-ema
-    rgb_vae_default_local_path: /root/autodl-fs/sd-vae-ft-ema
+    rgb_vae_default_local_path: ""
     rgb_vae_local_files_only: false
     teacher:
       ckpt: ""

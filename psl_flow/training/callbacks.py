@@ -159,11 +159,23 @@ class QualitativeSampleCallback(pl.Callback):
         out_dir = epoch_dir / f"loader_{dataloader_idx}" / f"batch_{batch_idx:04d}"
         out_dir.mkdir(parents=True, exist_ok=True)
         grid_items = []
+        grid_shape: tuple[int, ...] | None = None
         for key, value in tensors.items():
             try:
                 image = _display_tensor(value, self.max_images)
                 save_image(image, out_dir / f"{key}.png")
-                grid_items.append(_as_three(image))
+                grid_image = _as_three(image)
+                shape = tuple(grid_image.shape[1:])
+                if grid_shape is None:
+                    grid_shape = shape
+                    grid_items.append(grid_image)
+                elif shape == grid_shape:
+                    grid_items.append(grid_image)
+                else:
+                    print(
+                        f"[samples][WARN] skip key={key} in combined grid: "
+                        f"shape={shape} does not match first_shape={grid_shape}"
+                    )
             except Exception as exc:
                 print(f"[samples][WARN] skip non-image output key={key}: {exc}")
         if grid_items:

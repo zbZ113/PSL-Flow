@@ -73,8 +73,9 @@ TERB_NUM_EPOCHS="${TERB_NUM_EPOCHS:-200}"
 PSLVAE_NUM_EPOCHS="${PSLVAE_NUM_EPOCHS:-300}"
 TERB_VAL_EVERY_EPOCHS="${TERB_VAL_EVERY_EPOCHS:-20}"
 PSLVAE_VAL_EVERY_EPOCHS="${PSLVAE_VAL_EVERY_EPOCHS:-50}"
+FLOW_VAL_EVERY_STEPS_WAS_SET="${FLOW_VAL_EVERY_STEPS+x}"
+SIT_CHECKPOINT_EVERY_STEPS_WAS_SET="${SIT_CHECKPOINT_EVERY_STEPS+x}"
 FLOW_VAL_EVERY_STEPS="${FLOW_VAL_EVERY_STEPS:-5000}"
-SIT_CHECKPOINT_EVERY_STEPS="${SIT_CHECKPOINT_EVERY_STEPS:-${FLOW_VAL_EVERY_STEPS}}"
 TERB_NUM_SAMPLES_PER_EPOCH="${TERB_NUM_SAMPLES_PER_EPOCH:-${NUM_SAMPLES_PER_EPOCH:-auto}}"
 PSLVAE_NUM_SAMPLES_PER_EPOCH="${PSLVAE_NUM_SAMPLES_PER_EPOCH:-${NUM_SAMPLES_PER_EPOCH:-auto}}"
 FLOW_NUM_SAMPLES_PER_EPOCH="${FLOW_NUM_SAMPLES_PER_EPOCH:-${NUM_SAMPLES_PER_EPOCH:-auto}}"
@@ -91,6 +92,9 @@ PSLVAE_CHECKPOINT_MONITOR="${PSLVAE_CHECKPOINT_MONITOR:-val/LPIPS}"
 FLOW_CHECKPOINT_MONITOR="${FLOW_CHECKPOINT_MONITOR:-val/LPIPS}"
 FLOW_SELECT="${FLOW_SELECT:-step2}"
 EVAL_FID="${EVAL_FID:-0}"
+FINAL_EVAL_FID="${FINAL_EVAL_FID:-1}"
+EVAL_EFFICIENCY="${EVAL_EFFICIENCY:-0}"
+FINAL_EVAL_EFFICIENCY="${FINAL_EVAL_EFFICIENCY:-1}"
 NORMALIZER_MAX_SAMPLES="${NORMALIZER_MAX_SAMPLES:-auto}"
 NORMALIZER_DEVICE="${NORMALIZER_DEVICE:-auto}"
 NORMALIZER_LATENT_SAMPLE_MODE="${NORMALIZER_LATENT_SAMPLE_MODE:-sample}"
@@ -108,11 +112,16 @@ case "${DATASET_NAME}:${ROUTE}" in
   DroneVehicle_day:klvae_sit) DEFAULT_SIT_STEP_1=70000; DEFAULT_SIT_STEP_2=70000 ;;
   DroneVehicle_night:klvae_sit) DEFAULT_SIT_STEP_1=90000; DEFAULT_SIT_STEP_2=90000 ;;
 esac
-SIT_STEP_1="${SIT_STEP_1:-${DEFAULT_SIT_STEP_1}}"
-SIT_STEP_2="${SIT_STEP_2:-${DEFAULT_SIT_STEP_2}}"
+SIT_STEP_UNIT="${SIT_STEP_UNIT:-steps}"
+SIT_STEP_1_RAW="${SIT_STEP_1:-${DEFAULT_SIT_STEP_1}}"
+SIT_STEP_2_RAW="${SIT_STEP_2:-${DEFAULT_SIT_STEP_2}}"
+SIT_SAMPLE_1="${SIT_SAMPLE_1:-auto}"
+SIT_SAMPLE_2="${SIT_SAMPLE_2:-auto}"
+SIT_EPOCH_1="${SIT_EPOCH_1:-1}"
+SIT_EPOCH_2="${SIT_EPOCH_2:-${SIT_EPOCH_1}}"
 SIT_EVAL_SPLIT="${SIT_EVAL_SPLIT:-val}"
 
-RGB_VAE_PATH="${RGB_VAE_PATH:-/root/autodl-fs/sd-vae-ft-ema}"
+RGB_VAE_PATH="${RGB_VAE_PATH:-}"
 RGB_VAE_REPO="${RGB_VAE_REPO:-stabilityai/sd-vae-ft-ema}"
 RGB_VAE_LOCAL_FILES_ONLY="${RGB_VAE_LOCAL_FILES_ONLY:-false}"
 THERMAL_KLVAE_CKPT="${THERMAL_KLVAE_CKPT:-}"
@@ -178,15 +187,66 @@ resolve_samples_per_epoch() {
   local value="$1" label="$2" resolved
   if [[ "${value}" == "auto" ]]; then
     resolved="$(dataset_train_sample_count)"
-    log_msg "Resolved ${label} num_samples_per_epoch=auto -> ${resolved}"
+    log_msg "Resolved ${label} num_samples_per_epoch=auto -> ${resolved}" >&2
     printf "%s" "${resolved}"
   else
     if [[ ! "${value}" =~ ^[0-9]+$ ]]; then
-      log_msg "ERR ${label} num_samples_per_epoch must be a positive integer or auto: ${value}"
+      log_msg "ERR ${label} num_samples_per_epoch must be a positive integer or auto: ${value}" >&2
       exit 1
     fi
     printf "%s" "${value}"
   fi
+}
+
+ceil_div() {
+  local numerator="$1"
+  local denominator="$2"
+  if (( denominator <= 0 )); then
+    log_msg "ERR denominator must be positive for ceil_div: ${denominator}" >&2
+    exit 1
+  fi
+  printf "%s" "$(((numerator + denominator - 1) / denominator))"
+}
+
+resolve_sit_steps() {
+  local target="$1" label="$2" resolved_samples resolved_steps
+  case "${SIT_STEP_UNIT}" in
+    steps)
+      if [[ ! "${target}" =~ ^[0-9]+$ ]] || (( target <= 0 )); then
+        log_msg "ERR ${label} must be a positive integer when SIT_STEP_UNIT=steps: ${target}" >&2
+        exit 1
+      fi
+      printf "%s" "${target}"
+      ;;
+    samples)
+      if [[ "${target}" == "auto" ]]; then
+        resolved_samples="${FLOW_NUM_SAMPLES_PER_EPOCH}"
+      else
+        if [[ ! "${target}" =~ ^[0-9]+$ ]] || (( target <= 0 )); then
+          log_msg "ERR ${label} sample target must be a positive integer or auto: ${target}" >&2
+          exit 1
+        fi
+        resolved_samples="${target}"
+      fi
+      resolved_steps="$(ceil_div "${resolved_samples}" "${TRAIN_BATCH_SIZE_DEFAULT}")"
+      log_msg "Resolved ${label}: SIT_STEP_UNIT=samples, samples=${resolved_samples}, batch=${TRAIN_BATCH_SIZE_DEFAULT} -> steps=${resolved_steps}" >&2
+      printf "%s" "${resolved_steps}"
+      ;;
+    epochs)
+      if [[ ! "${target}" =~ ^[0-9]+$ ]] || (( target <= 0 )); then
+        log_msg "ERR ${label} epoch target must be a positive integer: ${target}" >&2
+        exit 1
+      fi
+      resolved_samples="$((FLOW_NUM_SAMPLES_PER_EPOCH * target))"
+      resolved_steps="$(ceil_div "${resolved_samples}" "${TRAIN_BATCH_SIZE_DEFAULT}")"
+      log_msg "Resolved ${label}: SIT_STEP_UNIT=epochs, epochs=${target}, samples_per_epoch=${FLOW_NUM_SAMPLES_PER_EPOCH}, batch=${TRAIN_BATCH_SIZE_DEFAULT} -> steps=${resolved_steps}" >&2
+      printf "%s" "${resolved_steps}"
+      ;;
+    *)
+      log_msg "ERR unsupported SIT_STEP_UNIT=${SIT_STEP_UNIT}; expected steps, samples, or epochs" >&2
+      exit 1
+      ;;
+  esac
 }
 
 is_truthy() {
@@ -239,6 +299,32 @@ log_msg() {
 TERB_NUM_SAMPLES_PER_EPOCH="$(resolve_samples_per_epoch "${TERB_NUM_SAMPLES_PER_EPOCH}" "TeR-B")"
 PSLVAE_NUM_SAMPLES_PER_EPOCH="$(resolve_samples_per_epoch "${PSLVAE_NUM_SAMPLES_PER_EPOCH}" "PSL-VAE")"
 FLOW_NUM_SAMPLES_PER_EPOCH="$(resolve_samples_per_epoch "${FLOW_NUM_SAMPLES_PER_EPOCH}" "${ROUTE}")"
+case "${SIT_STEP_UNIT}" in
+  steps)
+    SIT_STEP_1="$(resolve_sit_steps "${SIT_STEP_1_RAW}" "SiT step1")"
+    SIT_STEP_2="$(resolve_sit_steps "${SIT_STEP_2_RAW}" "SiT step2")"
+    ;;
+  samples)
+    SIT_STEP_1="$(resolve_sit_steps "${SIT_SAMPLE_1}" "SiT step1")"
+    SIT_STEP_2="$(resolve_sit_steps "${SIT_SAMPLE_2}" "SiT step2")"
+    ;;
+  epochs)
+    SIT_STEP_1="$(resolve_sit_steps "${SIT_EPOCH_1}" "SiT step1")"
+    SIT_STEP_2="$(resolve_sit_steps "${SIT_EPOCH_2}" "SiT step2")"
+    ;;
+  *)
+    log_msg "ERR unsupported SIT_STEP_UNIT=${SIT_STEP_UNIT}; expected steps, samples, or epochs"
+    exit 1
+    ;;
+esac
+if [[ -z "${FLOW_VAL_EVERY_STEPS_WAS_SET}" && "${SIT_STEP_UNIT}" != "steps" ]]; then
+  FLOW_VAL_EVERY_STEPS="${SIT_STEP_1}"
+  log_msg "Resolved FLOW_VAL_EVERY_STEPS=${FLOW_VAL_EVERY_STEPS} from ${SIT_STEP_UNIT} target"
+fi
+if [[ -z "${SIT_CHECKPOINT_EVERY_STEPS_WAS_SET}" ]]; then
+  SIT_CHECKPOINT_EVERY_STEPS="${FLOW_VAL_EVERY_STEPS}"
+fi
+log_msg "Resolved SiT targets: unit=${SIT_STEP_UNIT}, step1=${SIT_STEP_1}, step2=${SIT_STEP_2}, val_every_steps=${FLOW_VAL_EVERY_STEPS}, checkpoint_every_steps=${SIT_CHECKPOINT_EVERY_STEPS}"
 if [[ "${NORMALIZER_MAX_SAMPLES}" == "auto" ]]; then
   NORMALIZER_MAX_SAMPLES="${PSLVAE_NUM_SAMPLES_PER_EPOCH}"
 fi
@@ -877,30 +963,46 @@ import os
 ) = sys.argv[1:]
 with open(base, "r", encoding="utf-8") as handle:
     cfg = yaml.safe_load(handle)
+
+def ensure_dict(parent, key):
+    value = parent.get(key)
+    if not isinstance(value, dict):
+        value = {}
+        parent[key] = value
+    return value
+
 cfg["route"] = route if route in {"psl_flow", "klvae_sit"} else cfg.get("route")
-datasets = cfg.setdefault("datasets", {})
+datasets = ensure_dict(cfg, "datasets")
 datasets["datasets_folder"] = os.environ.get("DATASETS_PREPROCESS_ROOT", datasets.get("datasets_folder", "./datasets_preprocess"))
 datasets["train_datasets"] = [dataset]
 datasets["val_datasets"] = [dataset]
 datasets["test_datasets"] = [dataset]
 datasets["target_val_dataset"] = dataset
-training = cfg.setdefault("training", {})
+training = ensure_dict(cfg, "training")
 training["train_batch_size"] = int(train_bs)
 training["test_batch_size"] = int(test_bs)
 training["num_workers"] = int(workers)
 training["num_samples_per_epoch"] = int(samples)
 training["mixed_precision"] = str(mixed).lower() in {"1", "true", "yes", "y", "on"}
-model_cfg = cfg.setdefault("model", {}).setdefault("model_config", {})
+model_cfg = ensure_dict(ensure_dict(cfg, "model"), "model_config")
 if teacher_ckpt:
-    cfg.setdefault("training", {}).setdefault("loss", {}).setdefault("config", {}).setdefault("teacher", {})["ckpt"] = teacher_ckpt
-    model_cfg.setdefault("teacher", {})["ckpt"] = teacher_ckpt
+    loss_cfg = ensure_dict(ensure_dict(training, "loss"), "config")
+    ensure_dict(loss_cfg, "teacher")["ckpt"] = teacher_ckpt
+    ensure_dict(model_cfg, "teacher")["ckpt"] = teacher_ckpt
 if psl_vae_ckpt:
     model_cfg["psl_vae_ckpt"] = psl_vae_ckpt
-if rgb_path:
-    model_cfg["rgb_vae_path"] = rgb_path
-if rgb_repo:
-    model_cfg["rgb_vae_repo"] = rgb_repo
-model_cfg["rgb_vae_local_files_only"] = str(rgb_local_only).lower() in {"1", "true", "yes", "y", "on"}
+uses_rgb_vae = bool(
+    route == "klvae_sit"
+    or "rgb_vae_config" in model_cfg
+    or "rgb_vae_repo" in model_cfg
+    or "rgb_vae_path" in model_cfg
+)
+if uses_rgb_vae:
+    if rgb_path:
+        model_cfg["rgb_vae_path"] = rgb_path
+    if rgb_repo:
+        model_cfg["rgb_vae_repo"] = rgb_repo
+    model_cfg["rgb_vae_local_files_only"] = str(rgb_local_only).lower() in {"1", "true", "yes", "y", "on"}
 if route == "klvae_sit":
     if thermal_klvae_ckpt:
         model_cfg["thermal_vae_ckpt"] = thermal_klvae_ckpt
@@ -912,7 +1014,7 @@ PY
 
 patch_training_strategy() {
   local cfg="$1" epochs="$2" check_val_every="$3" val_check_interval="$4" checkpoint_monitor="$5" checkpoint_mode="$6" checkpoint_every_epochs="$7"
-  python - "${cfg}" "${epochs}" "${check_val_every}" "${val_check_interval}" "${checkpoint_monitor}" "${checkpoint_mode}" "${checkpoint_every_epochs}" "${GRADIENT_CLIP_VAL}" "${RUN_SEED}" "${CUDA_TF32}" "${FLOAT32_MATMUL_PRECISION}" "${NUM_SAMPLE_IMAGES}" "${NUM_SAMPLE_BATCHES}" "${EVAL_FID}" <<'PY'
+  python - "${cfg}" "${epochs}" "${check_val_every}" "${val_check_interval}" "${checkpoint_monitor}" "${checkpoint_mode}" "${checkpoint_every_epochs}" "${GRADIENT_CLIP_VAL}" "${RUN_SEED}" "${CUDA_TF32}" "${FLOAT32_MATMUL_PRECISION}" "${NUM_SAMPLE_IMAGES}" "${NUM_SAMPLE_BATCHES}" "${EVAL_FID}" "${EVAL_EFFICIENCY}" <<'PY'
 import sys
 import yaml
 
@@ -931,6 +1033,7 @@ import yaml
     num_sample_images,
     num_sample_batches,
     eval_fid,
+    eval_efficiency,
 ) = sys.argv[1:]
 with open(path, "r", encoding="utf-8") as handle:
     cfg = yaml.safe_load(handle)
@@ -957,6 +1060,24 @@ training["export_samples"] = True
 training["num_sample_images"] = int(num_sample_images)
 training["num_sample_batches"] = int(num_sample_batches)
 training["eval_fid"] = str(eval_fid).lower() in {"1", "true", "yes", "y", "on"}
+training["eval_efficiency"] = str(eval_efficiency).lower() in {"1", "true", "yes", "y", "on"}
+with open(path, "w", encoding="utf-8") as handle:
+    yaml.safe_dump(cfg, handle, sort_keys=False)
+PY
+}
+
+patch_final_eval_options() {
+  local cfg="$1" fid_enabled="$2" efficiency_enabled="$3"
+  python - "${cfg}" "${fid_enabled}" "${efficiency_enabled}" <<'PY'
+import sys
+import yaml
+
+path, fid_enabled, efficiency_enabled = sys.argv[1:]
+with open(path, "r", encoding="utf-8") as handle:
+    cfg = yaml.safe_load(handle)
+training = cfg.setdefault("training", {})
+training["eval_fid"] = str(fid_enabled).lower() in {"1", "true", "yes", "y", "on"}
+training["eval_efficiency"] = str(efficiency_enabled).lower() in {"1", "true", "yes", "y", "on"}
 with open(path, "w", encoding="utf-8") as handle:
     yaml.safe_dump(cfg, handle, sort_keys=False)
 PY
@@ -1189,6 +1310,7 @@ assert_file "${FLOW_SELECTED_CKPT}" "${ROUTE} selected checkpoint"
 append_summary "${ROUTE}" "flow_select_${FLOW_SELECT}" "" 0 0 "NA" "${FLOW_SELECTED_CKPT}"
 
 if should_run_validation "${FLOW_VAL_METRICS_JSON}"; then
+  patch_final_eval_options "${FLOW_CFG}" "${FINAL_EVAL_FID}" "${FINAL_EVAL_EFFICIENCY}"
   run_stage "${ROUTE}" "final_validation_${SIT_EVAL_SPLIT}" "" "${FLOW_SELECTED_CKPT}" \
     python -m psl_flow.training.train_psl_flow --config "${FLOW_CFG}" --mode "${EVAL_MODE}" \
       --ckpt "${FLOW_SELECTED_CKPT}" --metrics-json "${FLOW_VAL_METRICS_JSON}" \

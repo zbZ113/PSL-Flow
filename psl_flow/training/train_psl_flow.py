@@ -4,12 +4,14 @@ import argparse
 import copy
 import inspect
 import json
+import time
 from pathlib import Path
 from typing import Any
 
 import pytorch_lightning as pl
 import torch
 from torch import nn
+from torch.profiler import ProfilerActivity, profile
 import yaml
 from diffusers.models import AutoencoderKL
 
@@ -58,13 +60,22 @@ def _load_rgb_vae_kl(model_cfg: dict[str, Any]) -> nn.Module:
     rgb_path = str(model_cfg.get("rgb_vae_path", "") or "")
     rgb_repo = str(model_cfg.get("rgb_vae_repo", f"stabilityai/sd-vae-ft-{model_cfg.get('vae', 'ema')}"))
     local_only = bool(model_cfg.get("rgb_vae_local_files_only", False))
-    default_local = str(model_cfg.get("rgb_vae_default_local_path", "/root/autodl-fs/sd-vae-ft-ema"))
+    default_local = str(model_cfg.get("rgb_vae_default_local_path", "") or "")
+
+    def accessible_path(candidate: str) -> Path | None:
+        path = Path(candidate)
+        try:
+            if path.exists():
+                return path
+        except OSError as exc:
+            print(f"[PSL-Flow][WARN] Skip inaccessible RGB VAE path: {candidate} ({type(exc).__name__}: {exc})")
+        return None
 
     for candidate in (rgb_path, default_local):
         if not candidate:
             continue
-        candidate_path = Path(candidate)
-        if candidate_path.exists():
+        candidate_path = accessible_path(candidate)
+        if candidate_path is not None:
             if candidate_path.is_dir():
                 print(f"[PSL-Flow] Load frozen RGB VAE from local diffusers dir: {candidate}")
                 return AutoencoderKL.from_pretrained(candidate, local_files_only=True)
@@ -77,6 +88,13 @@ def _load_rgb_vae_kl(model_cfg: dict[str, Any]) -> nn.Module:
             )
             print(f"[PSL-Flow] Loaded frozen RGB VAE state dict: {info}")
             return model
+
+    if local_only:
+        raise FileNotFoundError(
+            "RGB VAE local loading is required, but no accessible rgb_vae_path or "
+            f"rgb_vae_default_local_path was found. rgb_vae_path={rgb_path!r}, "
+            f"rgb_vae_default_local_path={default_local!r}"
+        )
 
     if rgb_path and "/" in rgb_path and not Path(rgb_path).is_absolute():
         print(f"[PSL-Flow] Load frozen RGB VAE from repo/id: {rgb_path}")
@@ -179,6 +197,46 @@ def _log_and_reset_fid(pl_module: pl.LightningModule, metric: nn.Module | None, 
         metric.reset()
 
 
+def _sync_if_cuda(device: torch.device) -> None:
+    if device.type == "cuda":
+        torch.cuda.synchronize(device)
+
+
+def _module_params_m(modules: tuple[nn.Module | None, ...]) -> float:
+    seen: set[int] = set()
+    total = 0
+    for module in modules:
+        if module is None:
+            continue
+        for parameter in module.parameters():
+            ident = id(parameter)
+            if ident in seen:
+                continue
+            seen.add(ident)
+            total += int(parameter.numel())
+    return total / 1e6
+
+
+def _profile_generate_flops(generate_fn, device: torch.device) -> int:
+    activities = [ProfilerActivity.CPU]
+    if device.type == "cuda":
+        activities.append(ProfilerActivity.CUDA)
+    _sync_if_cuda(device)
+    with torch.no_grad():
+        with profile(
+            activities=activities,
+            record_shapes=False,
+            profile_memory=False,
+            with_flops=True,
+        ) as prof:
+            generate_fn()
+    _sync_if_cuda(device)
+    total = 0
+    for event in prof.key_averages():
+        total += int(getattr(event, "flops", 0) or 0)
+    return total
+
+
 class PSLFlowLightningModule(pl.LightningModule):
     """PSL-Flow SiT wrapper.
 
@@ -249,6 +307,8 @@ class PSLFlowLightningModule(pl.LightningModule):
         eval_fid = bool(config.get("training", {}).get("eval_fid", False) or model_cfg.get("eval_fid", False))
         self.val_fid = _make_fid_metric(eval_fid, "psl_flow/val")
         self.test_fid = _make_fid_metric(eval_fid, "psl_flow/test")
+        self.eval_efficiency = bool(config.get("training", {}).get("eval_efficiency", False) or model_cfg.get("eval_efficiency", False))
+        self._efficiency_stats: dict[str, dict[str, float | int | None]] = {}
         self.optimizer_cfg = dict(config.get("training", {}).get("optimizer", {"name": "AdamW", "lr": 1e-4, "weight_decay": 0.0}))
 
     def configure_optimizers(self):
@@ -310,10 +370,59 @@ class PSLFlowLightningModule(pl.LightningModule):
             decoded = self.psl_vae.decode_latents(z_phys)
         return decoded["y_hat"]
 
+    def _inference_params_m(self) -> float:
+        return _module_params_m((self.rgb_vae, self.ema, self.psl_vae))
+
+    def _reset_efficiency(self, split: str) -> None:
+        if self.eval_efficiency and not getattr(self.trainer, "sanity_checking", False):
+            self._efficiency_stats[split] = {"elapsed": 0.0, "samples": 0, "flops": None}
+
+    def _generate_with_efficiency(self, split: str, rgb: torch.Tensor, dataset_idx: torch.Tensor) -> torch.Tensor:
+        if not self.eval_efficiency or getattr(self.trainer, "sanity_checking", False):
+            return self.generate(rgb, dataset_idx)
+        device = rgb.device
+        _sync_if_cuda(device)
+        start = time.perf_counter()
+        pred = self.generate(rgb, dataset_idx)
+        _sync_if_cuda(device)
+        elapsed = time.perf_counter() - start
+        stats = self._efficiency_stats.setdefault(split, {"elapsed": 0.0, "samples": 0, "flops": None})
+        stats["elapsed"] = float(stats["elapsed"] or 0.0) + elapsed
+        stats["samples"] = int(stats["samples"] or 0) + int(rgb.shape[0])
+        if stats.get("flops") is None:
+            batch_size = max(int(rgb.shape[0]), 1)
+            devices = [device.index if device.index is not None else torch.cuda.current_device()] if device.type == "cuda" else []
+            try:
+                with torch.random.fork_rng(devices=devices, enabled=True):
+                    flops = _profile_generate_flops(lambda: self.generate(rgb, dataset_idx), device)
+                stats["flops"] = float(flops) / float(batch_size)
+                if flops == 0:
+                    print("[efficiency][WARN] torch.profiler returned 0 FLOPs. Some operators may be unsupported.")
+            except Exception as exc:
+                stats["flops"] = 0.0
+                print(f"[efficiency][WARN] failed to profile FLOPs: {exc}")
+        return pred
+
+    def _log_efficiency(self, split: str) -> None:
+        if not self.eval_efficiency or getattr(self.trainer, "sanity_checking", False):
+            return
+        stats = self._efficiency_stats.get(split, {})
+        samples = int(stats.get("samples") or 0)
+        if samples <= 0:
+            return
+        rt = float(stats.get("elapsed") or 0.0) / float(samples)
+        params_m = self._inference_params_m()
+        flops_g = float(stats.get("flops") or 0.0) / 1e9
+        self.log(f"{split}/RT(s)", torch.tensor(rt, device=self.device), sync_dist=True, add_dataloader_idx=False)
+        self.log(f"{split}/Params(M)", torch.tensor(params_m, device=self.device), sync_dist=True, add_dataloader_idx=False)
+        if flops_g > 0.0:
+            self.log(f"{split}/FLOPs(G)", torch.tensor(flops_g, device=self.device), sync_dist=True, add_dataloader_idx=False)
+        print(f"[efficiency] {split}/FLOPs(G)={flops_g:.4f}, {split}/Params(M)={params_m:.4f}, {split}/RT(s)={rt:.6f}, samples={samples}")
+
     def validation_step(self, batch, batch_idx):
         rgb, thermal, dataset_idx = batch[:3]
         target = thermal_to_01(thermal)
-        pred = self.generate(rgb, dataset_idx)
+        pred = self._generate_with_efficiency("val", rgb, dataset_idx)
         self.log("val/PSNR", _psnr(pred, target).mean(), sync_dist=True, add_dataloader_idx=False)
         self.log("val/SSIM", ssim_per_sample(pred, target).mean(), sync_dist=True, add_dataloader_idx=False)
         if self.eval_lpips is not None:
@@ -333,7 +442,7 @@ class PSLFlowLightningModule(pl.LightningModule):
     def test_step(self, batch, batch_idx):
         rgb, thermal, dataset_idx = batch[:3]
         target = thermal_to_01(thermal)
-        pred = self.generate(rgb, dataset_idx)
+        pred = self._generate_with_efficiency("test", rgb, dataset_idx)
         self.log("test/PSNR", _psnr(pred, target).mean(), sync_dist=True, add_dataloader_idx=False)
         self.log("test/SSIM", ssim_per_sample(pred, target).mean(), sync_dist=True, add_dataloader_idx=False)
         if self.eval_lpips is not None:
@@ -350,10 +459,18 @@ class PSLFlowLightningModule(pl.LightningModule):
             "compare": torch.cat([target, pred, error], dim=-1),
         }
 
+    def on_validation_epoch_start(self) -> None:
+        self._reset_efficiency("val")
+
     def on_validation_epoch_end(self) -> None:
+        self._log_efficiency("val")
         _log_and_reset_fid(self, self.val_fid, "val/FID")
 
+    def on_test_epoch_start(self) -> None:
+        self._reset_efficiency("test")
+
     def on_test_epoch_end(self) -> None:
+        self._log_efficiency("test")
         _log_and_reset_fid(self, self.test_fid, "test/FID")
 
 
@@ -414,6 +531,8 @@ class KLVaeSiTLightningModule(pl.LightningModule):
         eval_fid = bool(config.get("training", {}).get("eval_fid", False) or model_cfg.get("eval_fid", False))
         self.val_fid = _make_fid_metric(eval_fid, "klvae_sit/val")
         self.test_fid = _make_fid_metric(eval_fid, "klvae_sit/test")
+        self.eval_efficiency = bool(config.get("training", {}).get("eval_efficiency", False) or model_cfg.get("eval_efficiency", False))
+        self._efficiency_stats: dict[str, dict[str, float | int | None]] = {}
         self.optimizer_cfg = dict(config.get("training", {}).get("optimizer", {"name": "AdamW", "lr": 1e-4, "weight_decay": 0.0}))
 
     def configure_optimizers(self):
@@ -473,10 +592,59 @@ class KLVaeSiTLightningModule(pl.LightningModule):
             decoded = self.thermal_vae.decode(z_thermal).sample
         return _decode_thermal_to_01(decoded)
 
+    def _inference_params_m(self) -> float:
+        return _module_params_m((self.rgb_vae, self.ema, self.thermal_vae))
+
+    def _reset_efficiency(self, split: str) -> None:
+        if self.eval_efficiency and not getattr(self.trainer, "sanity_checking", False):
+            self._efficiency_stats[split] = {"elapsed": 0.0, "samples": 0, "flops": None}
+
+    def _generate_with_efficiency(self, split: str, rgb: torch.Tensor, dataset_idx: torch.Tensor) -> torch.Tensor:
+        if not self.eval_efficiency or getattr(self.trainer, "sanity_checking", False):
+            return self.generate(rgb, dataset_idx)
+        device = rgb.device
+        _sync_if_cuda(device)
+        start = time.perf_counter()
+        pred = self.generate(rgb, dataset_idx)
+        _sync_if_cuda(device)
+        elapsed = time.perf_counter() - start
+        stats = self._efficiency_stats.setdefault(split, {"elapsed": 0.0, "samples": 0, "flops": None})
+        stats["elapsed"] = float(stats["elapsed"] or 0.0) + elapsed
+        stats["samples"] = int(stats["samples"] or 0) + int(rgb.shape[0])
+        if stats.get("flops") is None:
+            batch_size = max(int(rgb.shape[0]), 1)
+            devices = [device.index if device.index is not None else torch.cuda.current_device()] if device.type == "cuda" else []
+            try:
+                with torch.random.fork_rng(devices=devices, enabled=True):
+                    flops = _profile_generate_flops(lambda: self.generate(rgb, dataset_idx), device)
+                stats["flops"] = float(flops) / float(batch_size)
+                if flops == 0:
+                    print("[efficiency][WARN] torch.profiler returned 0 FLOPs. Some operators may be unsupported.")
+            except Exception as exc:
+                stats["flops"] = 0.0
+                print(f"[efficiency][WARN] failed to profile FLOPs: {exc}")
+        return pred
+
+    def _log_efficiency(self, split: str) -> None:
+        if not self.eval_efficiency or getattr(self.trainer, "sanity_checking", False):
+            return
+        stats = self._efficiency_stats.get(split, {})
+        samples = int(stats.get("samples") or 0)
+        if samples <= 0:
+            return
+        rt = float(stats.get("elapsed") or 0.0) / float(samples)
+        params_m = self._inference_params_m()
+        flops_g = float(stats.get("flops") or 0.0) / 1e9
+        self.log(f"{split}/RT(s)", torch.tensor(rt, device=self.device), sync_dist=True, add_dataloader_idx=False)
+        self.log(f"{split}/Params(M)", torch.tensor(params_m, device=self.device), sync_dist=True, add_dataloader_idx=False)
+        if flops_g > 0.0:
+            self.log(f"{split}/FLOPs(G)", torch.tensor(flops_g, device=self.device), sync_dist=True, add_dataloader_idx=False)
+        print(f"[efficiency] {split}/FLOPs(G)={flops_g:.4f}, {split}/Params(M)={params_m:.4f}, {split}/RT(s)={rt:.6f}, samples={samples}")
+
     def validation_step(self, batch, batch_idx):
         rgb, thermal, dataset_idx = batch[:3]
         target = thermal_to_01(thermal)
-        pred = self.generate(rgb, dataset_idx)
+        pred = self._generate_with_efficiency("val", rgb, dataset_idx)
         self.log("val/PSNR", _psnr(pred, target).mean(), sync_dist=True, add_dataloader_idx=False)
         self.log("val/SSIM", ssim_per_sample(pred, target).mean(), sync_dist=True, add_dataloader_idx=False)
         if self.eval_lpips is not None:
@@ -499,7 +667,7 @@ class KLVaeSiTLightningModule(pl.LightningModule):
     def test_step(self, batch, batch_idx):
         rgb, thermal, dataset_idx = batch[:3]
         target = thermal_to_01(thermal)
-        pred = self.generate(rgb, dataset_idx)
+        pred = self._generate_with_efficiency("test", rgb, dataset_idx)
         self.log("test/PSNR", _psnr(pred, target).mean(), sync_dist=True, add_dataloader_idx=False)
         self.log("test/SSIM", ssim_per_sample(pred, target).mean(), sync_dist=True, add_dataloader_idx=False)
         if self.eval_lpips is not None:
@@ -519,10 +687,18 @@ class KLVaeSiTLightningModule(pl.LightningModule):
             "compare": torch.cat([target, pred, error], dim=-1),
         }
 
+    def on_validation_epoch_start(self) -> None:
+        self._reset_efficiency("val")
+
     def on_validation_epoch_end(self) -> None:
+        self._log_efficiency("val")
         _log_and_reset_fid(self, self.val_fid, "val/FID")
 
+    def on_test_epoch_start(self) -> None:
+        self._reset_efficiency("test")
+
     def on_test_epoch_end(self) -> None:
+        self._log_efficiency("test")
         _log_and_reset_fid(self, self.test_fid, "test/FID")
 
 
