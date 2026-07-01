@@ -141,6 +141,44 @@ def _rgb_to_01(rgb: torch.Tensor) -> torch.Tensor:
     return torch.clamp(rgb * 0.5 + 0.5, 0.0, 1.0)
 
 
+def _to_fid_image(x: torch.Tensor) -> torch.Tensor:
+    return (_repeat_to_three(x.detach().clamp(0.0, 1.0)) * 255.0).to(torch.uint8)
+
+
+def _make_fid_metric(enabled: bool, label: str) -> nn.Module | None:
+    if not enabled:
+        return None
+    try:
+        from torchmetrics.image.fid import FrechetInceptionDistance
+    except Exception as exc:
+        print(f"[FID][WARN] eval_fid requested for {label}, but torchmetrics FID is unavailable: {exc}")
+        return None
+    try:
+        return FrechetInceptionDistance(feature=2048, normalize=False)
+    except Exception as exc:
+        print(f"[FID][WARN] eval_fid requested for {label}, but FID metric could not be initialized: {exc}")
+        return None
+
+
+def _update_fid_metric(metric: nn.Module | None, pred: torch.Tensor, target: torch.Tensor) -> None:
+    if metric is None:
+        return
+    metric.update(_to_fid_image(target), real=True)
+    metric.update(_to_fid_image(pred), real=False)
+
+
+def _log_and_reset_fid(pl_module: pl.LightningModule, metric: nn.Module | None, name: str) -> None:
+    if metric is None:
+        return
+    try:
+        fid = metric.compute()
+        pl_module.log(name, fid, sync_dist=True, add_dataloader_idx=False)
+    except Exception as exc:
+        print(f"[FID][WARN] failed to compute {name}: {exc}")
+    finally:
+        metric.reset()
+
+
 class PSLFlowLightningModule(pl.LightningModule):
     """PSL-Flow SiT wrapper.
 
@@ -208,6 +246,9 @@ class PSLFlowLightningModule(pl.LightningModule):
         self.sample_ode = dict(model_cfg.get("sample_ode", {"sampling_method": "dopri5", "num_steps": 50}))
         self.eval_lpips = LPIPS().eval() if bool(model_cfg.get("eval_lpips", True)) else None
         _freeze(self.eval_lpips)
+        eval_fid = bool(config.get("training", {}).get("eval_fid", False) or model_cfg.get("eval_fid", False))
+        self.val_fid = _make_fid_metric(eval_fid, "psl_flow/val")
+        self.test_fid = _make_fid_metric(eval_fid, "psl_flow/test")
         self.optimizer_cfg = dict(config.get("training", {}).get("optimizer", {"name": "AdamW", "lr": 1e-4, "weight_decay": 0.0}))
 
     def configure_optimizers(self):
@@ -242,12 +283,12 @@ class PSLFlowLightningModule(pl.LightningModule):
         kwargs = {"y": dataset_idx, "x_RGB": z_vis}
         loss_dict = self.transport.training_losses(self.sit, z_phys, kwargs)
         loss = loss_dict["loss"].mean()
-        self.log("train/loss_flow", loss, prog_bar=True, sync_dist=True)
-        self.log("train/z_phys_std", z_phys.std(unbiased=False), sync_dist=True)
-        self.log("train/z_phys_mean", z_phys.mean(), sync_dist=True)
-        self.log("train/z_vis_std", z_vis.std(unbiased=False), sync_dist=True)
+        self.log("train/loss_flow", loss, prog_bar=True, sync_dist=True, add_dataloader_idx=False)
+        self.log("train/z_phys_std", z_phys.std(unbiased=False), sync_dist=True, add_dataloader_idx=False)
+        self.log("train/z_phys_mean", z_phys.mean(), sync_dist=True, add_dataloader_idx=False)
+        self.log("train/z_vis_std", z_vis.std(unbiased=False), sync_dist=True, add_dataloader_idx=False)
         if "xt" in loss_dict:
-            self.log("train/z_t_std", loss_dict["xt"].std(unbiased=False), sync_dist=True)
+            self.log("train/z_t_std", loss_dict["xt"].std(unbiased=False), sync_dist=True, add_dataloader_idx=False)
         self._update_ema()
         return loss
 
@@ -273,12 +314,13 @@ class PSLFlowLightningModule(pl.LightningModule):
         rgb, thermal, dataset_idx = batch[:3]
         target = thermal_to_01(thermal)
         pred = self.generate(rgb, dataset_idx)
-        self.log("val/PSNR", _psnr(pred, target).mean(), sync_dist=True)
-        self.log("val/SSIM", ssim_per_sample(pred, target).mean(), sync_dist=True)
+        self.log("val/PSNR", _psnr(pred, target).mean(), sync_dist=True, add_dataloader_idx=False)
+        self.log("val/SSIM", ssim_per_sample(pred, target).mean(), sync_dist=True, add_dataloader_idx=False)
         if self.eval_lpips is not None:
             pred_lpips = _repeat_to_three(pred * 2.0 - 1.0)
             target_lpips = _repeat_to_three(target * 2.0 - 1.0)
-            self.log("val/LPIPS", self.eval_lpips(pred_lpips, target_lpips).mean(), sync_dist=True)
+            self.log("val/LPIPS", self.eval_lpips(pred_lpips, target_lpips).mean(), sync_dist=True, add_dataloader_idx=False)
+        _update_fid_metric(self.val_fid, pred, target)
         error = (pred - target).abs()
         return {
             "RGB": _rgb_to_01(rgb),
@@ -292,12 +334,13 @@ class PSLFlowLightningModule(pl.LightningModule):
         rgb, thermal, dataset_idx = batch[:3]
         target = thermal_to_01(thermal)
         pred = self.generate(rgb, dataset_idx)
-        self.log("test/PSNR", _psnr(pred, target).mean(), sync_dist=True)
-        self.log("test/SSIM", ssim_per_sample(pred, target).mean(), sync_dist=True)
+        self.log("test/PSNR", _psnr(pred, target).mean(), sync_dist=True, add_dataloader_idx=False)
+        self.log("test/SSIM", ssim_per_sample(pred, target).mean(), sync_dist=True, add_dataloader_idx=False)
         if self.eval_lpips is not None:
             pred_lpips = _repeat_to_three(pred * 2.0 - 1.0)
             target_lpips = _repeat_to_three(target * 2.0 - 1.0)
-            self.log("test/LPIPS", self.eval_lpips(pred_lpips, target_lpips).mean(), sync_dist=True)
+            self.log("test/LPIPS", self.eval_lpips(pred_lpips, target_lpips).mean(), sync_dist=True, add_dataloader_idx=False)
+        _update_fid_metric(self.test_fid, pred, target)
         error = (pred - target).abs()
         return {
             "RGB": _rgb_to_01(rgb),
@@ -306,6 +349,12 @@ class PSLFlowLightningModule(pl.LightningModule):
             "error": error,
             "compare": torch.cat([target, pred, error], dim=-1),
         }
+
+    def on_validation_epoch_end(self) -> None:
+        _log_and_reset_fid(self, self.val_fid, "val/FID")
+
+    def on_test_epoch_end(self) -> None:
+        _log_and_reset_fid(self, self.test_fid, "test/FID")
 
 
 class KLVaeSiTLightningModule(pl.LightningModule):
@@ -362,6 +411,9 @@ class KLVaeSiTLightningModule(pl.LightningModule):
         self.sample_ode = dict(model_cfg.get("sample_ode", {"sampling_method": "dopri5", "num_steps": 50}))
         self.eval_lpips = LPIPS().eval() if bool(model_cfg.get("eval_lpips", True)) else None
         _freeze(self.eval_lpips)
+        eval_fid = bool(config.get("training", {}).get("eval_fid", False) or model_cfg.get("eval_fid", False))
+        self.val_fid = _make_fid_metric(eval_fid, "klvae_sit/val")
+        self.test_fid = _make_fid_metric(eval_fid, "klvae_sit/test")
         self.optimizer_cfg = dict(config.get("training", {}).get("optimizer", {"name": "AdamW", "lr": 1e-4, "weight_decay": 0.0}))
 
     def configure_optimizers(self):
@@ -398,9 +450,9 @@ class KLVaeSiTLightningModule(pl.LightningModule):
         z_vis = self._encode_rgb(rgb)
         loss_dict = self.transport.training_losses(self.sit, z_thermal, {"y": dataset_idx, "x_RGB": z_vis})
         loss = loss_dict["loss"].mean()
-        self.log("train/loss_flow", loss, prog_bar=True, sync_dist=True)
-        self.log("train/z_thermal_std", z_thermal.std(unbiased=False), sync_dist=True)
-        self.log("train/z_vis_std", z_vis.std(unbiased=False), sync_dist=True)
+        self.log("train/loss_flow", loss, prog_bar=True, sync_dist=True, add_dataloader_idx=False)
+        self.log("train/z_thermal_std", z_thermal.std(unbiased=False), sync_dist=True, add_dataloader_idx=False)
+        self.log("train/z_vis_std", z_vis.std(unbiased=False), sync_dist=True, add_dataloader_idx=False)
         self._update_ema()
         return loss
 
@@ -425,14 +477,16 @@ class KLVaeSiTLightningModule(pl.LightningModule):
         rgb, thermal, dataset_idx = batch[:3]
         target = thermal_to_01(thermal)
         pred = self.generate(rgb, dataset_idx)
-        self.log("val/PSNR", _psnr(pred, target).mean(), sync_dist=True)
-        self.log("val/SSIM", ssim_per_sample(pred, target).mean(), sync_dist=True)
+        self.log("val/PSNR", _psnr(pred, target).mean(), sync_dist=True, add_dataloader_idx=False)
+        self.log("val/SSIM", ssim_per_sample(pred, target).mean(), sync_dist=True, add_dataloader_idx=False)
         if self.eval_lpips is not None:
             self.log(
                 "val/LPIPS",
                 self.eval_lpips(_repeat_to_three(pred * 2.0 - 1.0), _repeat_to_three(target * 2.0 - 1.0)).mean(),
                 sync_dist=True,
+                add_dataloader_idx=False,
             )
+        _update_fid_metric(self.val_fid, pred, target)
         error = (pred - target).abs()
         return {
             "RGB": _rgb_to_01(rgb),
@@ -446,14 +500,16 @@ class KLVaeSiTLightningModule(pl.LightningModule):
         rgb, thermal, dataset_idx = batch[:3]
         target = thermal_to_01(thermal)
         pred = self.generate(rgb, dataset_idx)
-        self.log("test/PSNR", _psnr(pred, target).mean(), sync_dist=True)
-        self.log("test/SSIM", ssim_per_sample(pred, target).mean(), sync_dist=True)
+        self.log("test/PSNR", _psnr(pred, target).mean(), sync_dist=True, add_dataloader_idx=False)
+        self.log("test/SSIM", ssim_per_sample(pred, target).mean(), sync_dist=True, add_dataloader_idx=False)
         if self.eval_lpips is not None:
             self.log(
                 "test/LPIPS",
                 self.eval_lpips(_repeat_to_three(pred * 2.0 - 1.0), _repeat_to_three(target * 2.0 - 1.0)).mean(),
                 sync_dist=True,
+                add_dataloader_idx=False,
             )
+        _update_fid_metric(self.test_fid, pred, target)
         error = (pred - target).abs()
         return {
             "RGB": _rgb_to_01(rgb),
@@ -462,6 +518,12 @@ class KLVaeSiTLightningModule(pl.LightningModule):
             "error": error,
             "compare": torch.cat([target, pred, error], dim=-1),
         }
+
+    def on_validation_epoch_end(self) -> None:
+        _log_and_reset_fid(self, self.val_fid, "val/FID")
+
+    def on_test_epoch_end(self) -> None:
+        _log_and_reset_fid(self, self.test_fid, "test/FID")
 
 
 def load_yaml(path: str | Path) -> dict[str, Any]:

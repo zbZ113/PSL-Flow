@@ -101,3 +101,4 @@ training:
   export_samples: true
   num_sample_images: 4
   num_sample_batches: 1
+  eval_fid: false

@@ -96,9 +96,13 @@ class LocalMetricsCallback(pl.Callback):
 
 
 def _display_tensor(x: torch.Tensor, max_samples: int) -> torch.Tensor:
+    if x.ndim not in (3, 4):
+        raise ValueError(f"expected image-like tensor rank 3 or 4, got shape={tuple(x.shape)}")
     image = x.detach().float().cpu()[:max_samples]
     if image.ndim == 3:
         image = image.unsqueeze(1)
+    if image.ndim != 4 or image.shape[-1] <= 1 or image.shape[-2] <= 1:
+        raise ValueError(f"expected image-like tensor [N,C,H,W], got shape={tuple(x.shape)}")
     if image.shape[1] not in (1, 3):
         image = image[:, :1]
     flat = image.flatten(1)
@@ -156,9 +160,12 @@ class QualitativeSampleCallback(pl.Callback):
         out_dir.mkdir(parents=True, exist_ok=True)
         grid_items = []
         for key, value in tensors.items():
-            image = _display_tensor(value, self.max_images)
-            save_image(image, out_dir / f"{key}.png")
-            grid_items.append(_as_three(image))
+            try:
+                image = _display_tensor(value, self.max_images)
+                save_image(image, out_dir / f"{key}.png")
+                grid_items.append(_as_three(image))
+            except Exception as exc:
+                print(f"[samples][WARN] skip non-image output key={key}: {exc}")
         if grid_items:
             save_image(torch.cat(grid_items, dim=0), out_dir / "grid.png", nrow=self.max_images)
         if split == "val":

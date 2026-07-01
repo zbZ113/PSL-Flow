@@ -36,13 +36,13 @@ class TeRBLightningModule(pl.LightningModule):
         thermal_01 = thermal_to_01(batch[1])
         outputs = self(thermal_01)
         losses = self.loss_fn(outputs)
-        self.log(f"{prefix}/loss_total", losses["loss_total"], prog_bar=True, sync_dist=True)
-        self.log(f"{prefix}/loss_ter", losses["loss_ter"], sync_dist=True)
-        self.log(f"{prefix}/loss_b", losses["loss_b"], sync_dist=True)
-        self.log(f"{prefix}/s_phys_mean", losses["s_phys_mean"], sync_dist=True)
-        self.log(f"{prefix}/s_phys_std", losses["s_phys_std"], sync_dist=True)
-        self.log(f"{prefix}/b_mean", losses["b_mean"], sync_dist=True)
-        self.log(f"{prefix}/b_std", losses["b_std"], sync_dist=True)
+        self.log(f"{prefix}/loss_total", losses["loss_total"], prog_bar=True, sync_dist=True, add_dataloader_idx=False)
+        self.log(f"{prefix}/loss_ter", losses["loss_ter"], sync_dist=True, add_dataloader_idx=False)
+        self.log(f"{prefix}/loss_b", losses["loss_b"], sync_dist=True, add_dataloader_idx=False)
+        self.log(f"{prefix}/s_phys_mean", losses["s_phys_mean"], sync_dist=True, add_dataloader_idx=False)
+        self.log(f"{prefix}/s_phys_std", losses["s_phys_std"], sync_dist=True, add_dataloader_idx=False)
+        self.log(f"{prefix}/b_mean", losses["b_mean"], sync_dist=True, add_dataloader_idx=False)
+        self.log(f"{prefix}/b_std", losses["b_std"], sync_dist=True, add_dataloader_idx=False)
         return losses["loss_total"]
 
     def training_step(self, batch, batch_idx):
@@ -52,13 +52,13 @@ class TeRBLightningModule(pl.LightningModule):
         thermal_01 = thermal_to_01(batch[1])
         outputs = self(thermal_01)
         losses = self.loss_fn(outputs)
-        self.log("val/loss_total", losses["loss_total"], prog_bar=True, sync_dist=True)
-        self.log("val/loss_ter", losses["loss_ter"], sync_dist=True)
-        self.log("val/loss_b", losses["loss_b"], sync_dist=True)
-        self.log("val/s_phys_mean", losses["s_phys_mean"], sync_dist=True)
-        self.log("val/s_phys_std", losses["s_phys_std"], sync_dist=True)
-        self.log("val/b_mean", losses["b_mean"], sync_dist=True)
-        self.log("val/b_std", losses["b_std"], sync_dist=True)
+        self.log("val/loss_total", losses["loss_total"], prog_bar=True, sync_dist=True, add_dataloader_idx=False)
+        self.log("val/loss_ter", losses["loss_ter"], sync_dist=True, add_dataloader_idx=False)
+        self.log("val/loss_b", losses["loss_b"], sync_dist=True, add_dataloader_idx=False)
+        self.log("val/s_phys_mean", losses["s_phys_mean"], sync_dist=True, add_dataloader_idx=False)
+        self.log("val/s_phys_std", losses["s_phys_std"], sync_dist=True, add_dataloader_idx=False)
+        self.log("val/b_mean", losses["b_mean"], sync_dist=True, add_dataloader_idx=False)
+        self.log("val/b_std", losses["b_std"], sync_dist=True, add_dataloader_idx=False)
         return {
             "S": thermal_01,
             "e": outputs["e"],

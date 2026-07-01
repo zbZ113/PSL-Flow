@@ -332,10 +332,12 @@ class PSLFlowWebDataModule(pl.LightningDataModule):
         )
 
     def val_dataloader(self):
-        return [self._eval_loader(dataset) for dataset in self.val_datasets]
+        loaders = [self._eval_loader(dataset) for dataset in self.val_datasets]
+        return loaders[0] if len(loaders) == 1 else loaders
 
     def test_dataloader(self):
-        return [self._eval_loader(dataset) for dataset in self.test_datasets]
+        loaders = [self._eval_loader(dataset) for dataset in self.test_datasets]
+        return loaders[0] if len(loaders) == 1 else loaders
 
 
 def thermal_to_01(x: torch.Tensor) -> torch.Tensor:

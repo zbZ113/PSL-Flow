@@ -143,13 +143,15 @@ FLOW_NUM_SAMPLES_PER_EPOCH=10000
 PSLVAE_SELECT=best_lpips      # best_lpips, best_psnr, best_ssim, best_fid, epoch, last
 PSLVAE_EPOCH=280             # used only when PSLVAE_SELECT=epoch
 FLOW_VAL_EVERY_STEPS=5000
+FLOW_SELECT=step2            # step1, step2, best, best_lpips, best_psnr, best_ssim, last
+EVAL_FID=0                   # optional; requires torchmetrics FID support when enabled
 SIT_STEP_1=45000
 SIT_STEP_2=75000
 ```
 
 Set `TRAIN_WITH_VALIDATION=0` only for timing-only benchmark runs. In that mode, the pipeline keeps `last.ckpt` and final validation, but training-time best checkpoint selection is unavailable.
 
-For the PSL-Flow route, `thermal_normalizer` is not fixed in the base config. The pipeline selects the PSL-VAE checkpoint according to `PSLVAE_SELECT`, estimates latent statistics from that selected model, and writes `psl_vae_ckpt`, `thermal_normalizer`, latent mean/std, and the stats JSON path into the patched SiT config before training starts.
+For the PSL-Flow route, `thermal_normalizer` is not fixed in the base config. The pipeline selects the PSL-VAE checkpoint according to `PSLVAE_SELECT`, estimates latent statistics from that selected model, and writes `psl_vae_ckpt`, `thermal_normalizer`, latent mean/std, and the stats JSON path into the patched SiT config before training starts. The normalizer cache is checkpoint-aware: changing the selected PSL-VAE checkpoint, TeR-B checkpoint, latent sampling mode, seed, or requested sample count forces re-estimation.
 
 ## Configs
 

@@ -89,6 +89,8 @@ PSLVAE_SELECT="${PSLVAE_SELECT:-best_lpips}"
 PSLVAE_EPOCH="${PSLVAE_EPOCH:-}"
 PSLVAE_CHECKPOINT_MONITOR="${PSLVAE_CHECKPOINT_MONITOR:-val/LPIPS}"
 FLOW_CHECKPOINT_MONITOR="${FLOW_CHECKPOINT_MONITOR:-val/LPIPS}"
+FLOW_SELECT="${FLOW_SELECT:-step2}"
+EVAL_FID="${EVAL_FID:-0}"
 NORMALIZER_MAX_SAMPLES="${NORMALIZER_MAX_SAMPLES:-auto}"
 NORMALIZER_DEVICE="${NORMALIZER_DEVICE:-auto}"
 NORMALIZER_LATENT_SAMPLE_MODE="${NORMALIZER_LATENT_SAMPLE_MODE:-sample}"
@@ -410,14 +412,24 @@ def copy(src: str, reason: str) -> None:
     shutil.copy2(src, selected_ckpt)
     print(f"[select-psl-vae] {reason}: {src} -> {selected_ckpt}")
 
-if strategy == "last":
-    copy(last_ckpt, "last")
-    raise SystemExit(0)
+def fallback(reason: str) -> None:
+    if os.path.isfile(best_ckpt):
+        copy(best_ckpt, f"fallback_best_alias_after_{reason}")
+    else:
+        copy(last_ckpt, f"fallback_last_after_{reason}")
 
-if strategy == "epoch":
-    if not epoch_arg:
-        raise SystemExit("PSLVAE_EPOCH is required when PSLVAE_SELECT=epoch")
-    wanted = int(epoch_arg)
+def checkpoint_epoch(path: str) -> int | None:
+    try:
+        import torch
+
+        payload = torch.load(path, map_location="cpu")
+        if isinstance(payload, dict) and "epoch" in payload:
+            return int(payload["epoch"])
+    except Exception:
+        return None
+    return None
+
+def find_epoch_ckpt(wanted: int) -> str | None:
     patterns = [
         f"**/epoch_{wanted:04d}.ckpt",
         f"**/epoch_{wanted - 1:04d}.ckpt",
@@ -427,11 +439,36 @@ if strategy == "epoch":
     for pattern in patterns:
         matches = sorted(glob.glob(os.path.join(run_root, pattern), recursive=True), key=os.path.getmtime, reverse=True)
         if matches:
-            copy(matches[0], f"epoch_{wanted}")
-            raise SystemExit(0)
-    raise SystemExit(f"no PSL-VAE checkpoint found for epoch {wanted} under {run_root}")
+            return matches[0]
+    candidates = sorted(glob.glob(os.path.join(run_root, "**", "*.ckpt"), recursive=True), key=os.path.getmtime, reverse=True)
+    for candidate in candidates:
+        epoch = checkpoint_epoch(candidate)
+        if epoch in {wanted, wanted - 1}:
+            return candidate
+    return None
 
-metric_name, mode = metric_by_strategy.get(strategy, metric_by_strategy["best_lpips"])
+if strategy == "last":
+    copy(last_ckpt, "last")
+    raise SystemExit(0)
+
+if strategy == "epoch":
+    if not epoch_arg:
+        raise SystemExit("PSLVAE_EPOCH is required when PSLVAE_SELECT=epoch")
+    wanted = int(epoch_arg)
+    match = find_epoch_ckpt(wanted)
+    if match:
+        copy(match, f"epoch_{wanted}")
+    else:
+        print(f"[select-psl-vae][WARN] no checkpoint found for epoch {wanted} under {run_root}; using fallback")
+        fallback(f"missing_epoch_{wanted}")
+    raise SystemExit(0)
+
+if strategy not in metric_by_strategy:
+    print(f"[select-psl-vae][WARN] unsupported strategy={strategy}; using fallback")
+    fallback(f"unsupported_{strategy}")
+    raise SystemExit(0)
+
+metric_name, mode = metric_by_strategy[strategy]
 metrics_path = Path(run_root) / "local_logs" / "metrics.csv"
 if metrics_path.is_file():
     best_epoch = None
@@ -445,20 +482,147 @@ if metrics_path.is_file():
                 best_value = value
                 best_epoch = int(row["epoch"])
     if best_epoch is not None:
-        for epoch in (best_epoch, best_epoch + 1):
-            matches = sorted(
-                glob.glob(os.path.join(run_root, "**", f"epoch_{epoch:04d}.ckpt"), recursive=True),
-                key=os.path.getmtime,
-                reverse=True,
-            )
-            if matches:
-                copy(matches[0], f"{strategy}:{metric_name}={best_value:.6g},epoch={best_epoch}")
+        for epoch in (best_epoch, best_epoch + 1, best_epoch - 1):
+            match = find_epoch_ckpt(epoch)
+            if match:
+                copy(match, f"{strategy}:{metric_name}={best_value:.6g},metric_epoch={best_epoch},ckpt_epoch={epoch}")
                 raise SystemExit(0)
-
-if os.path.isfile(best_ckpt):
-    copy(best_ckpt, f"{strategy}:best_alias")
+        print(
+            f"[select-psl-vae][WARN] metric {metric_name} best epoch {best_epoch} was found, "
+            "but no matching epoch checkpoint exists; using fallback"
+        )
+        fallback(f"missing_metric_epoch_{best_epoch}")
+        raise SystemExit(0)
 else:
-    copy(last_ckpt, f"{strategy}:fallback_last")
+    print(f"[select-psl-vae][WARN] metrics file not found: {metrics_path}; using fallback")
+
+if strategy == "best_fid":
+    print("[select-psl-vae][WARN] PSLVAE_SELECT=best_fid requested but val/FID is unavailable; using fallback")
+else:
+    print(f"[select-psl-vae][WARN] metric {metric_name} unavailable for strategy={strategy}; using fallback")
+fallback(f"missing_{metric_name.replace('/', '_')}")
+PY
+}
+
+select_flow_ckpt() {
+  local run_root="$1" step1="$2" step2="$3" selected="$4" strategy="$5"
+  python - "${run_root}" "${step1}" "${step2}" "${selected}" "${strategy}" <<'PY'
+import csv
+import glob
+import os
+import shutil
+import sys
+from pathlib import Path
+
+run_root, step1_ckpt, step2_ckpt, selected_ckpt, strategy = sys.argv[1:]
+strategy = (strategy or "step2").lower()
+best_ckpt = os.path.join(run_root, "checkpoints", "best.ckpt")
+last_ckpt = os.path.join(run_root, "checkpoints", "last.ckpt")
+metrics_path = Path(run_root) / "local_logs" / "metrics.csv"
+
+metric_by_strategy = {
+    "best": ("val/LPIPS", "min"),
+    "best_lpips": ("val/LPIPS", "min"),
+    "best_psnr": ("val/PSNR", "max"),
+    "best_ssim": ("val/SSIM", "max"),
+}
+
+def copy(src: str, reason: str, metric_value: str = "") -> None:
+    if not src or not os.path.isfile(src):
+        raise SystemExit(f"missing selected Flow checkpoint for {reason}: {src}")
+    os.makedirs(os.path.dirname(selected_ckpt), exist_ok=True)
+    shutil.copy2(src, selected_ckpt)
+    suffix = f" metric={metric_value}" if metric_value else ""
+    print(f"[select-flow] strategy={strategy} source={reason}{suffix}: {src} -> {selected_ckpt}")
+
+def fallback(reason: str) -> None:
+    if os.path.isfile(best_ckpt):
+        copy(best_ckpt, f"fallback_best_alias_after_{reason}")
+    elif os.path.isfile(last_ckpt):
+        copy(last_ckpt, f"fallback_last_after_{reason}")
+    else:
+        copy(step2_ckpt, f"fallback_step2_after_{reason}")
+
+def ckpt_step(path: str) -> int | None:
+    try:
+        import torch
+
+        payload = torch.load(path, map_location="cpu")
+        if isinstance(payload, dict) and "global_step" in payload:
+            return int(payload["global_step"])
+    except Exception:
+        return None
+    return None
+
+def find_step_ckpt(step: int) -> str | None:
+    patterns = [
+        f"**/step_{step:06d}.ckpt",
+        f"**/step_{step:07d}.ckpt",
+        f"**/*step={step}*.ckpt",
+        f"**/*step_{step}*.ckpt",
+    ]
+    for pattern in patterns:
+        matches = sorted(glob.glob(os.path.join(run_root, pattern), recursive=True), key=os.path.getmtime, reverse=True)
+        if matches:
+            return matches[0]
+    candidates = sorted(glob.glob(os.path.join(run_root, "**", "*.ckpt"), recursive=True), key=os.path.getmtime, reverse=True)
+    for candidate in candidates:
+        if ckpt_step(candidate) == step:
+            return candidate
+    return None
+
+if strategy == "step1":
+    copy(step1_ckpt, "step1")
+    raise SystemExit(0)
+if strategy == "step2":
+    copy(step2_ckpt, "step2")
+    raise SystemExit(0)
+if strategy == "last":
+    copy(last_ckpt, "last")
+    raise SystemExit(0)
+if strategy == "best" and os.path.isfile(best_ckpt):
+    copy(best_ckpt, "best_alias")
+    raise SystemExit(0)
+
+if strategy not in metric_by_strategy:
+    print(f"[select-flow][WARN] unsupported FLOW_SELECT={strategy}; using fallback")
+    fallback(f"unsupported_{strategy}")
+    raise SystemExit(0)
+
+metric_name, mode = metric_by_strategy[strategy]
+if not metrics_path.is_file():
+    print(f"[select-flow][WARN] metrics file not found: {metrics_path}; using fallback")
+    fallback("missing_metrics_csv")
+    raise SystemExit(0)
+
+best_step = None
+best_value = None
+with metrics_path.open("r", encoding="utf-8", newline="") as handle:
+    for row in csv.DictReader(handle):
+        if row.get("stage") != "val" or row.get("key") != metric_name:
+            continue
+        value = float(row["value"])
+        if best_value is None or (value < best_value if mode == "min" else value > best_value):
+            best_value = value
+            best_step = int(row["global_step"])
+
+if best_step is None:
+    print(f"[select-flow][WARN] metric {metric_name} unavailable for FLOW_SELECT={strategy}; using fallback")
+    if strategy == "best_lpips" and os.path.isfile(best_ckpt):
+        copy(best_ckpt, "fallback_best_alias_after_missing_val_LPIPS")
+        raise SystemExit(0)
+    fallback(f"missing_{metric_name.replace('/', '_')}")
+    raise SystemExit(0)
+
+match = find_step_ckpt(best_step)
+if match:
+    copy(match, f"{strategy}:{metric_name}:global_step={best_step}", f"{best_value:.6g}")
+else:
+    print(
+        f"[select-flow][WARN] metric {metric_name} best global_step {best_step} was found, "
+        "but no matching checkpoint exists; using fallback"
+    )
+    fallback(f"missing_metric_step_{best_step}")
 PY
 }
 
@@ -489,8 +653,12 @@ copy_existing_ckpt_if_any() {
 copy_existing_ckpt_at_or_after_step() {
   local search_root="$1" dst="$2" target_step="$3" label="$4"
   if [[ -f "${dst}" ]]; then
-    log_msg "Reuse existing ${label}: ${dst}"
-    return 0
+    if checkpoint_reaches_step "${dst}" "${target_step}"; then
+      log_msg "Reuse existing ${label}: ${dst}"
+      return 0
+    fi
+    log_msg "WARN existing ${label} does not reach step ${target_step}; removing stale alias: ${dst}"
+    rm -f "${dst}"
   fi
   python - "${search_root}" "${target_step}" "${dst}" "${label}" <<'PY'
 import glob
@@ -585,6 +753,103 @@ except Exception:
 PY
 }
 
+normalizer_cache_status() {
+  local stats_json="$1" flow_cfg="$2" psl_vae_ckpt="$3" teacher_ckpt="$4" sample_mode="$5" seed="$6" max_samples="$7" train_samples="$8" train_batch_size="$9"
+  python - "${stats_json}" "${flow_cfg}" "${psl_vae_ckpt}" "${teacher_ckpt}" "${sample_mode}" "${seed}" "${max_samples}" "${train_samples}" "${train_batch_size}" <<'PY'
+import json
+import os
+import sys
+from pathlib import Path
+
+import yaml
+
+(
+    stats_json,
+    flow_cfg,
+    psl_vae_ckpt,
+    teacher_ckpt,
+    sample_mode,
+    seed,
+    max_samples,
+    train_samples,
+    train_batch_size,
+) = sys.argv[1:]
+
+def norm_path(value: str) -> str:
+    if not value:
+        return ""
+    return os.path.normcase(os.path.abspath(os.path.normpath(value)))
+
+def mismatch(reason: str) -> None:
+    print(f"NORMALIZER_CACHE_MISMATCH {reason}")
+    raise SystemExit(1)
+
+if not os.path.isfile(stats_json):
+    mismatch(f"missing_stats_json={stats_json}")
+if not os.path.isfile(flow_cfg):
+    mismatch(f"missing_flow_config={flow_cfg}")
+
+with open(stats_json, "r", encoding="utf-8") as handle:
+    stats = json.load(handle)
+with open(flow_cfg, "r", encoding="utf-8") as handle:
+    cfg = yaml.safe_load(handle)
+model_cfg = cfg.get("model", {}).get("model_config", {})
+
+try:
+    stats_normalizer = float(stats.get("thermal_normalizer"))
+    flow_normalizer = float(model_cfg.get("thermal_normalizer"))
+except Exception:
+    mismatch("missing_or_invalid_thermal_normalizer")
+if abs(stats_normalizer - flow_normalizer) > 1e-9:
+    mismatch(f"thermal_normalizer: stats={stats_normalizer} flow_config={flow_normalizer}")
+
+checks = [
+    ("psl_vae_ckpt", norm_path(stats.get("psl_vae_ckpt", "")), norm_path(psl_vae_ckpt)),
+    ("teacher_ckpt", norm_path(stats.get("teacher_ckpt", "")), norm_path(teacher_ckpt)),
+    ("latent_sample_mode", str(stats.get("latent_sample_mode", "")), str(sample_mode)),
+    ("seed", str(stats.get("seed", "")), str(int(seed))),
+]
+flow_checks = [
+    ("flow.psl_vae_ckpt", norm_path(model_cfg.get("psl_vae_ckpt", "")), norm_path(psl_vae_ckpt)),
+    ("flow.teacher.ckpt", norm_path(model_cfg.get("teacher", {}).get("ckpt", "")), norm_path(teacher_ckpt)),
+    ("flow.normalizer_stats_json", norm_path(model_cfg.get("normalizer_stats_json", "")), norm_path(stats_json)),
+]
+for key, got, expected in checks + flow_checks:
+    if got != expected:
+        mismatch(f"{key}: got={got or '<empty>'} expected={expected or '<empty>'}")
+
+def fingerprint(path: str) -> dict[str, int]:
+    stat = os.stat(path)
+    return {"size": int(stat.st_size), "mtime_ns": int(stat.st_mtime_ns)}
+
+for key, path in (("psl_vae_ckpt", psl_vae_ckpt), ("teacher_ckpt", teacher_ckpt)):
+    recorded = stats.get(f"{key}_fingerprint", {})
+    current = fingerprint(path)
+    for field in ("size", "mtime_ns"):
+        if int(recorded.get(field, -1)) != int(current[field]):
+            mismatch(f"{key}_fingerprint.{field}: got={recorded.get(field)} expected={current[field]}")
+
+num_samples = int(stats.get("num_samples", -1))
+max_samples = int(max_samples)
+train_samples = int(train_samples)
+train_batch_size = max(1, int(train_batch_size))
+expected_cap = train_samples if max_samples <= 0 else min(train_samples, max_samples)
+upper = train_samples if max_samples <= 0 else min(train_samples, expected_cap + train_batch_size - 1)
+if num_samples < expected_cap or num_samples > upper:
+    mismatch(
+        "num_samples: "
+        f"got={num_samples} expected_range=[{expected_cap},{upper}] "
+        f"max_samples={max_samples} train_samples={train_samples}"
+    )
+
+print(
+    "NORMALIZER_CACHE_REUSE "
+    f"stats={stats_json} psl_vae_ckpt={psl_vae_ckpt} teacher_ckpt={teacher_ckpt} "
+    f"mode={sample_mode} seed={seed} num_samples={num_samples}"
+)
+PY
+}
+
 patch_cfg_common() {
   local base="$1" out="$2" dataset="$3" teacher_ckpt="$4" psl_vae_ckpt="$5" samples_per_epoch="$6" route="$7"
   python - "${base}" "${out}" "${dataset}" "${teacher_ckpt}" "${psl_vae_ckpt}" "${RGB_VAE_PATH}" "${RGB_VAE_REPO}" "${RGB_VAE_LOCAL_FILES_ONLY}" "${TRAIN_BATCH_SIZE_DEFAULT}" "${TEST_BATCH_SIZE_DEFAULT}" "${NUM_WORKERS_DEFAULT}" "${samples_per_epoch}" "${MIXED_PRECISION}" "${route}" "${THERMAL_KLVAE_CKPT}" "${THERMAL_KLVAE_NORMALIZER}" <<'PY'
@@ -647,7 +912,7 @@ PY
 
 patch_training_strategy() {
   local cfg="$1" epochs="$2" check_val_every="$3" val_check_interval="$4" checkpoint_monitor="$5" checkpoint_mode="$6" checkpoint_every_epochs="$7"
-  python - "${cfg}" "${epochs}" "${check_val_every}" "${val_check_interval}" "${checkpoint_monitor}" "${checkpoint_mode}" "${checkpoint_every_epochs}" "${GRADIENT_CLIP_VAL}" "${RUN_SEED}" "${CUDA_TF32}" "${FLOAT32_MATMUL_PRECISION}" "${NUM_SAMPLE_IMAGES}" "${NUM_SAMPLE_BATCHES}" <<'PY'
+  python - "${cfg}" "${epochs}" "${check_val_every}" "${val_check_interval}" "${checkpoint_monitor}" "${checkpoint_mode}" "${checkpoint_every_epochs}" "${GRADIENT_CLIP_VAL}" "${RUN_SEED}" "${CUDA_TF32}" "${FLOAT32_MATMUL_PRECISION}" "${NUM_SAMPLE_IMAGES}" "${NUM_SAMPLE_BATCHES}" "${EVAL_FID}" <<'PY'
 import sys
 import yaml
 
@@ -665,6 +930,7 @@ import yaml
     matmul_precision,
     num_sample_images,
     num_sample_batches,
+    eval_fid,
 ) = sys.argv[1:]
 with open(path, "r", encoding="utf-8") as handle:
     cfg = yaml.safe_load(handle)
@@ -690,6 +956,7 @@ training["float32_matmul_precision"] = matmul_precision
 training["export_samples"] = True
 training["num_sample_images"] = int(num_sample_images)
 training["num_sample_batches"] = int(num_sample_batches)
+training["eval_fid"] = str(eval_fid).lower() in {"1", "true", "yes", "y", "on"}
 with open(path, "w", encoding="utf-8") as handle:
     yaml.safe_dump(cfg, handle, sort_keys=False)
 PY
@@ -789,8 +1056,21 @@ if [[ "${ROUTE}" == "psl_flow" ]]; then
         --accelerator "${PL_ACCELERATOR_DEFAULT}" --strategy "${PL_STRATEGY_DEFAULT}"
   fi
 
-  if [[ -f "${FLOW_STATS_JSON}" && -f "${FLOW_CFG}" ]] && stats_json_ready "${FLOW_STATS_JSON}" && flow_config_ready "${FLOW_CFG}" && ! is_truthy "${RERUN_NORMALIZER}"; then
-    log_msg "Skip latent stats; config already has thermal_normalizer: ${FLOW_CFG}"
+  NORMALIZER_CACHE_OK=0
+  NORMALIZER_CACHE_REPORT=""
+  if ! is_truthy "${RERUN_NORMALIZER}"; then
+    set +e
+    NORMALIZER_CACHE_REPORT="$(normalizer_cache_status "${FLOW_STATS_JSON}" "${FLOW_CFG}" "${PSLVAE_CKPT}" "${TERB_CKPT}" "${NORMALIZER_LATENT_SAMPLE_MODE}" "${NORMALIZER_SEED}" "${NORMALIZER_MAX_SAMPLES}" "${PSLVAE_NUM_SAMPLES_PER_EPOCH}" "${TRAIN_BATCH_SIZE_DEFAULT}" 2>&1)"
+    NORMALIZER_CACHE_OK="$?"
+    set -e
+    while IFS= read -r line; do
+      [[ -n "${line}" ]] && log_msg "${line}"
+    done <<< "${NORMALIZER_CACHE_REPORT}"
+  else
+    log_msg "NORMALIZER_CACHE_MISMATCH forced_by_RERUN_NORMALIZER=1"
+  fi
+  if [[ "${NORMALIZER_CACHE_OK}" -eq 0 ]]; then
+    log_msg "Skip latent stats; checkpoint-aware cache is valid: ${FLOW_STATS_JSON}"
   else
     patch_cfg_common "${FLOW_BASE_CFG}" "${FLOW_CFG}" "${DATASET_NAME}" "${TERB_CKPT}" "${PSLVAE_CKPT}" "${FLOW_NUM_SAMPLES_PER_EPOCH}" "psl_flow"
     patch_training_strategy "${FLOW_CFG}" "" "0" "${FLOW_VAL_EVERY_STEPS}" "${FLOW_CHECKPOINT_MONITOR}" "min" ""
@@ -820,6 +1100,7 @@ fi
 
 printf -v FLOW_STEP1 "%s/checkpoints/step_%06d.ckpt" "${FLOW_RUN}" "${SIT_STEP_1}"
 printf -v FLOW_STEP2 "%s/checkpoints/step_%06d.ckpt" "${FLOW_RUN}" "${SIT_STEP_2}"
+FLOW_SELECTED_CKPT="${PIPE_ROOT}/checkpoints/${ROUTE}_selected.ckpt"
 FLOW_STEP1_METRICS_JSON="${ARTIFACT_ROOT}/metrics/${ROUTE}_step_${SIT_STEP_1}_${SIT_EVAL_SPLIT}_${DATASET_NAME}.json"
 FLOW_VAL_METRICS_JSON="${ARTIFACT_ROOT}/metrics/${ROUTE}_final_${SIT_EVAL_SPLIT}_${DATASET_NAME}.json"
 
@@ -900,10 +1181,17 @@ else
 fi
 assert_file "${FLOW_STEP2}" "${ROUTE} step ${SIT_STEP_2}"
 
+FLOW_SELECT_REPORT="$(select_flow_ckpt "${FLOW_RUN}" "${FLOW_STEP1}" "${FLOW_STEP2}" "${FLOW_SELECTED_CKPT}" "${FLOW_SELECT}" 2>&1)"
+while IFS= read -r line; do
+  [[ -n "${line}" ]] && log_msg "${line}"
+done <<< "${FLOW_SELECT_REPORT}"
+assert_file "${FLOW_SELECTED_CKPT}" "${ROUTE} selected checkpoint"
+append_summary "${ROUTE}" "flow_select_${FLOW_SELECT}" "" 0 0 "NA" "${FLOW_SELECTED_CKPT}"
+
 if should_run_validation "${FLOW_VAL_METRICS_JSON}"; then
-  run_stage "${ROUTE}" "final_validation_${SIT_EVAL_SPLIT}" "" "${FLOW_STEP2}" \
+  run_stage "${ROUTE}" "final_validation_${SIT_EVAL_SPLIT}" "" "${FLOW_SELECTED_CKPT}" \
     python -m psl_flow.training.train_psl_flow --config "${FLOW_CFG}" --mode "${EVAL_MODE}" \
-      --ckpt "${FLOW_STEP2}" --metrics-json "${FLOW_VAL_METRICS_JSON}" \
+      --ckpt "${FLOW_SELECTED_CKPT}" --metrics-json "${FLOW_VAL_METRICS_JSON}" \
       --default-root-dir "${FLOW_RUN}" --devices "${PL_DEVICES_DEFAULT}" \
       --accelerator "${PL_ACCELERATOR_DEFAULT}" --strategy "${PL_STRATEGY_DEFAULT}"
 fi

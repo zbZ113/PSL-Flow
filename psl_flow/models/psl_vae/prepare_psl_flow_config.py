@@ -56,6 +56,16 @@ def _str_to_bool(value: str | bool) -> bool:
     return str(value).strip().lower() in {"1", "true", "yes", "y", "on"}
 
 
+def _file_fingerprint(path: str | Path) -> dict[str, int | str]:
+    resolved = Path(path)
+    stat = resolved.stat()
+    return {
+        "path": str(path),
+        "size": int(stat.st_size),
+        "mtime_ns": int(stat.st_mtime_ns),
+    }
+
+
 def _make_psl_vae(config: dict[str, Any], psl_vae_ckpt: str, teacher_ckpt: str, device: torch.device) -> PSLVAE:
     model_cfg = dict(config.get("model", {}).get("model_config", {}))
     model = PSLVAE(model_cfg)
@@ -254,8 +264,14 @@ def main() -> None:
         {
             "psl_vae_ckpt": str(args.psl_vae_ckpt),
             "teacher_ckpt": str(args.teacher_ckpt),
+            "psl_vae_ckpt_fingerprint": _file_fingerprint(args.psl_vae_ckpt),
+            "teacher_ckpt_fingerprint": _file_fingerprint(args.teacher_ckpt),
             "psl_vae_config_source": cfg_source,
             "device": str(device),
+            "requested_max_samples": int(args.max_samples),
+            "normalizer_latent_sample_mode": str(args.latent_sample_mode),
+            "normalizer_seed": int(args.seed),
+            "train_num_samples_per_epoch": int(file_psl_cfg.get("training", {}).get("num_samples_per_epoch", 0) or 0),
         }
     )
     with open(stats_path, "w", encoding="utf-8") as handle:

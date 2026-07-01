@@ -48,12 +48,12 @@ class PSLVAELightningModule(pl.LightningModule):
         thermal_01 = thermal_to_01(batch[1])
         outputs = self(thermal_01)
         losses = self.loss_fn(outputs, thermal_01)
-        self.log(f"{prefix}/loss_total", losses["loss_total"], prog_bar=True, sync_dist=True)
+        self.log(f"{prefix}/loss_total", losses["loss_total"], prog_bar=True, sync_dist=True, add_dataloader_idx=False)
         for key, value in losses.items():
             if key != "loss_total":
-                self.log(f"{prefix}/{key}", value, sync_dist=True)
-        self.log(f"{prefix}/latent_std", outputs["z_phys"].std(unbiased=False), sync_dist=True)
-        self.log(f"{prefix}/latent_mean", outputs["z_phys"].mean(), sync_dist=True)
+                self.log(f"{prefix}/{key}", value, sync_dist=True, add_dataloader_idx=False)
+        self.log(f"{prefix}/latent_std", outputs["z_phys"].std(unbiased=False), sync_dist=True, add_dataloader_idx=False)
+        self.log(f"{prefix}/latent_mean", outputs["z_phys"].mean(), sync_dist=True, add_dataloader_idx=False)
         return losses["loss_total"]
 
     def training_step(self, batch, batch_idx):
@@ -63,15 +63,15 @@ class PSLVAELightningModule(pl.LightningModule):
         thermal_01 = thermal_to_01(batch[1])
         outputs = self(thermal_01)
         losses = self.loss_fn(outputs, thermal_01)
-        self.log("val/loss_total", losses["loss_total"], prog_bar=True, sync_dist=True)
+        self.log("val/loss_total", losses["loss_total"], prog_bar=True, sync_dist=True, add_dataloader_idx=False)
         for key, value in losses.items():
             if key != "loss_total":
-                self.log(f"val/{key}", value, sync_dist=True)
-        self.log("val/PSNR", psnr_per_sample(outputs["y_hat"], thermal_01).mean(), sync_dist=True)
-        self.log("val/SSIM", ssim_per_sample(outputs["y_hat"], thermal_01).mean(), sync_dist=True)
-        self.log("val/LPIPS", losses["loss_perc"], sync_dist=True)
-        self.log("val/latent_std", outputs["z_phys"].std(unbiased=False), sync_dist=True)
-        self.log("val/latent_mean", outputs["z_phys"].mean(), sync_dist=True)
+                self.log(f"val/{key}", value, sync_dist=True, add_dataloader_idx=False)
+        self.log("val/PSNR", psnr_per_sample(outputs["y_hat"], thermal_01).mean(), sync_dist=True, add_dataloader_idx=False)
+        self.log("val/SSIM", ssim_per_sample(outputs["y_hat"], thermal_01).mean(), sync_dist=True, add_dataloader_idx=False)
+        self.log("val/LPIPS", losses["loss_perc"], sync_dist=True, add_dataloader_idx=False)
+        self.log("val/latent_std", outputs["z_phys"].std(unbiased=False), sync_dist=True, add_dataloader_idx=False)
+        self.log("val/latent_mean", outputs["z_phys"].mean(), sync_dist=True, add_dataloader_idx=False)
         targets = outputs["targets"]
         return {
             "GT": thermal_01,
