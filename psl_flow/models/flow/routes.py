@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 
-ALLOWED_ROUTES = ("psl_flow", "klvae_sit")
+ALLOWED_ROUTES = ("psl_flow",)
 
 
 def validate_route(route: str | None) -> str:

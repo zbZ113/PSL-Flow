@@ -12,16 +12,20 @@ PSL-Flow translates aerial visible images into infrared images by learning condi
 
 ## Install
 
+The code was tested with Python 3.10, PyTorch 2.0.1, TorchVision 0.15.2, and CUDA 11.7 on an NVIDIA A100 GPU.
+
 ```bash
 conda env create -f environment.yml
 conda activate psl-flow
 ```
 
-or install into an existing CUDA-ready PyTorch environment:
+If your server already has a CUDA-ready PyTorch environment, install only the project-level dependencies:
 
 ```bash
 pip install -r requirements.txt
 ```
+
+For FID evaluation, keep `torchmetrics` and `torch-fidelity` installed. If they are unavailable, training still runs, but FID reporting is skipped with a warning.
 
 ## Data
 

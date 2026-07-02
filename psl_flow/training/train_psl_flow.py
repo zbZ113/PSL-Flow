@@ -123,7 +123,7 @@ def _load_state_or_pretrained_vae(
                 model,
                 path,
                 strict=False,
-                strip_prefixes=("model.", "module.", "thermal_vae.", "vae.", "klvae."),
+                strip_prefixes=("model.", "module.", "thermal_vae.", "vae."),
             )
             print(f"[{label}] Loaded frozen VAE state dict: {info}")
             return model
@@ -254,7 +254,7 @@ class PSLFlowLightningModule(pl.LightningModule):
     """PSL-Flow SiT wrapper.
 
     Target latent: z_phys = PSLVAE([T,e,R_env,B,Delta]).
-    Condition latent: z_vis = RGB KL-VAE(x_vis).
+    Condition latent: z_vis = RGB VAE(x_vis).
     Trainable module: SiT only.
     """
 
@@ -523,270 +523,6 @@ class PSLFlowLightningModule(pl.LightningModule):
         _log_and_reset_fid(self, self.test_fid, "test/FID")
 
 
-class KLVaeSiTLightningModule(pl.LightningModule):
-    """SiT ablation using KL-VAE latents on both thermal target and RGB condition."""
-
-    def __init__(self, config: dict[str, Any]):
-        super().__init__()
-        self.save_hyperparameters(config)
-        model_cfg = dict(config.get("model", {}).get("model_config", {}))
-        self.model_cfg = model_cfg
-
-        thermal_cfg = dict(model_cfg.get("thermal_vae_config", model_cfg.get("vae_config", {})))
-        thermal_path = str(model_cfg.get("thermal_vae_ckpt", "") or model_cfg.get("vae_path", ""))
-        thermal_repo = str(model_cfg.get("thermal_vae_repo", ""))
-        local_only = bool(model_cfg.get("thermal_vae_local_files_only", False))
-        self.thermal_vae = _load_state_or_pretrained_vae(
-            cfg=thermal_cfg,
-            path=thermal_path,
-            repo=thermal_repo,
-            local_files_only=local_only,
-            label="KLVAE-SiT thermal",
-        )
-        _freeze(self.thermal_vae)
-
-        self.rgb_vae = _load_rgb_vae_kl(model_cfg)
-        _freeze(self.rgb_vae)
-
-        self.thermal_latent_channels = int(
-            model_cfg.get(
-                "thermal_vae_latent_channels",
-                thermal_cfg.get("latent_channels", getattr(getattr(self.thermal_vae, "config", None), "latent_channels", 4)),
-            )
-        )
-        self.rgb_latent_channels = int(model_cfg.get("rgb_vae_latent_channels", 4))
-        self.downsample_factor = int(model_cfg.get("downsample_factor", 8))
-
-        sit_cfg = dict(model_cfg.get("sit_config", {}))
-        injection_args = copy.deepcopy(sit_cfg.get("injection_args", {"injection_method": "concat", "replace_RGB": False}))
-        injection_args.setdefault("rgb_in_chans", self.rgb_latent_channels)
-        arch = str(sit_cfg.get("arch", "L"))
-        patch_size = int(sit_cfg.get("patch_size", 2))
-        self.sit = sit_networks.SiT_models[f"SiT-{arch}/{patch_size}"](
-            in_channels=self.thermal_latent_channels,
-            num_classes=int(sit_cfg.get("num_classes", 1000)),
-            injection_args=injection_args,
-            repa=False,
-        )
-        self.ema = copy.deepcopy(self.sit).eval()
-        self.ema.requires_grad_(False)
-        self.transport = create_transport(**dict(model_cfg.get("transport_config", {"path_type": "Linear", "prediction": "velocity", "loss_weight": None})))
-        self.sampler = Sampler(self.transport)
-        self.thermal_normalizer = float(model_cfg.get("thermal_normalizer", 1.0) or 1.0)
-        self.rgb_normalizer = float(model_cfg.get("rgb_normalizer", 0.18215) or 1.0)
-        self.sample_ode = dict(model_cfg.get("sample_ode", {"sampling_method": "dopri5", "num_steps": 50}))
-        self.eval_lpips = LPIPS().eval() if bool(model_cfg.get("eval_lpips", True)) else None
-        _freeze(self.eval_lpips)
-        eval_fid = bool(config.get("training", {}).get("eval_fid", False) or model_cfg.get("eval_fid", False))
-        self.val_fid = _make_fid_metric(eval_fid, "klvae_sit/val")
-        self.test_fid = _make_fid_metric(eval_fid, "klvae_sit/test")
-        self.eval_efficiency = bool(config.get("training", {}).get("eval_efficiency", False) or model_cfg.get("eval_efficiency", False))
-        self._efficiency_stats: dict[str, dict[str, float | int | None]] = {}
-        self.optimizer_cfg = dict(config.get("training", {}).get("optimizer", {"name": "AdamW", "lr": 1e-4, "weight_decay": 0.0}))
-
-    def load_state_dict(self, state_dict, strict: bool = True):
-        incompatible = super().load_state_dict(state_dict, strict=False)
-        missing = [key for key in incompatible.missing_keys if not _is_optional_eval_state_key(key)]
-        unexpected = [key for key in incompatible.unexpected_keys if not _is_optional_eval_state_key(key)]
-        if strict and (missing or unexpected):
-            raise RuntimeError(
-                f"Error(s) in loading state_dict for {self.__class__.__name__}: "
-                f"{_format_incompatible_keys(missing, unexpected)}"
-            )
-        ignored_missing = len(incompatible.missing_keys) - len(missing)
-        ignored_unexpected = len(incompatible.unexpected_keys) - len(unexpected)
-        if ignored_missing or ignored_unexpected:
-            print(
-                "[checkpoint][WARN] ignored optional eval metric state mismatch: "
-                f"missing={ignored_missing}, unexpected={ignored_unexpected}"
-            )
-        return incompatible
-
-    def configure_optimizers(self):
-        return torch.optim.AdamW(
-            self.sit.parameters(),
-            lr=float(self.optimizer_cfg.get("lr", 1e-4)),
-            weight_decay=float(self.optimizer_cfg.get("weight_decay", 0.0)),
-        )
-
-    def _update_ema(self, decay: float = 0.9999) -> None:
-        with torch.no_grad():
-            for ema_p, p in zip(self.ema.parameters(), self.sit.parameters()):
-                ema_p.mul_(decay).add_(p, alpha=1.0 - decay)
-
-    def _thermal_for_vae(self, thermal: torch.Tensor) -> torch.Tensor:
-        in_channels = int(getattr(self.thermal_vae, "in_channels", 1))
-        if in_channels == 3 and thermal.shape[1] == 1:
-            return thermal.repeat(1, 3, 1, 1)
-        return thermal
-
-    def _encode_rgb(self, rgb: torch.Tensor) -> torch.Tensor:
-        with torch.no_grad():
-            posterior = self.rgb_vae.encode(rgb).latent_dist
-            return posterior.sample() * self.rgb_normalizer
-
-    def _encode_thermal(self, thermal: torch.Tensor) -> torch.Tensor:
-        with torch.no_grad():
-            posterior = self.thermal_vae.encode(self._thermal_for_vae(thermal)).latent_dist
-            return posterior.sample() * self.thermal_normalizer
-
-    def training_step(self, batch, batch_idx):
-        rgb, thermal, dataset_idx = batch[:3]
-        z_thermal = self._encode_thermal(thermal)
-        z_vis = self._encode_rgb(rgb)
-        loss_dict = self.transport.training_losses(self.sit, z_thermal, {"y": dataset_idx, "x_RGB": z_vis})
-        loss = loss_dict["loss"].mean()
-        self.log("train/loss_flow", loss, prog_bar=True, sync_dist=True, add_dataloader_idx=False)
-        self.log("train/z_thermal_std", z_thermal.std(unbiased=False), sync_dist=True, add_dataloader_idx=False)
-        self.log("train/z_vis_std", z_vis.std(unbiased=False), sync_dist=True, add_dataloader_idx=False)
-        self._update_ema()
-        return loss
-
-    def _sample_latent(self, rgb: torch.Tensor, dataset_idx: torch.Tensor, *, use_ema: bool = True) -> torch.Tensor:
-        z_vis = self._encode_rgb(rgb)
-        h = rgb.shape[-2] // self.downsample_factor
-        w = rgb.shape[-1] // self.downsample_factor
-        z0 = torch.randn(rgb.shape[0], self.thermal_latent_channels, h, w, device=rgb.device, dtype=z_vis.dtype)
-        sample_fn = self.sampler.sample_ode(**self.sample_ode)
-        model = self.ema if use_ema else self.sit
-        model_forward = model.forward
-        active_efficiency_split = getattr(self, "_active_efficiency_split", None)
-        if active_efficiency_split:
-            def counted_forward(*args, **kwargs):
-                stats = self._efficiency_stats.setdefault(active_efficiency_split, {"elapsed": 0.0, "samples": 0, "flops": None, "nfe": 0, "batches": 0})
-                stats["nfe"] = int(stats.get("nfe") or 0) + 1
-                return model.forward(*args, **kwargs)
-            model_forward = counted_forward
-        with torch.no_grad():
-            samples = sample_fn(z0, model_forward, y=dataset_idx, x_RGB=z_vis)[-1]
-        return samples / self.thermal_normalizer
-
-    def generate(self, rgb: torch.Tensor, dataset_idx: torch.Tensor) -> torch.Tensor:
-        z_thermal = self._sample_latent(rgb, dataset_idx, use_ema=True)
-        with torch.no_grad():
-            decoded = self.thermal_vae.decode(z_thermal).sample
-        return _decode_thermal_to_01(decoded)
-
-    def _inference_params_m(self) -> float:
-        return _module_params_m((self.rgb_vae, self.ema, self.thermal_vae))
-
-    def _reset_efficiency(self, split: str) -> None:
-        if self.eval_efficiency and not getattr(self.trainer, "sanity_checking", False):
-            self._efficiency_stats[split] = {"elapsed": 0.0, "samples": 0, "flops": None, "nfe": 0, "batches": 0}
-
-    def _generate_with_efficiency(self, split: str, rgb: torch.Tensor, dataset_idx: torch.Tensor) -> torch.Tensor:
-        if not self.eval_efficiency or getattr(self.trainer, "sanity_checking", False):
-            return self.generate(rgb, dataset_idx)
-        device = rgb.device
-        _sync_if_cuda(device)
-        start = time.perf_counter()
-        self._active_efficiency_split = split
-        try:
-            pred = self.generate(rgb, dataset_idx)
-        finally:
-            self._active_efficiency_split = None
-        _sync_if_cuda(device)
-        elapsed = time.perf_counter() - start
-        stats = self._efficiency_stats.setdefault(split, {"elapsed": 0.0, "samples": 0, "flops": None, "nfe": 0, "batches": 0})
-        stats["elapsed"] = float(stats["elapsed"] or 0.0) + elapsed
-        stats["samples"] = int(stats["samples"] or 0) + int(rgb.shape[0])
-        stats["batches"] = int(stats.get("batches") or 0) + 1
-        if stats.get("flops") is None:
-            batch_size = max(int(rgb.shape[0]), 1)
-            devices = [device.index if device.index is not None else torch.cuda.current_device()] if device.type == "cuda" else []
-            try:
-                with torch.random.fork_rng(devices=devices, enabled=True):
-                    flops = _profile_generate_flops(lambda: self.generate(rgb, dataset_idx), device)
-                stats["flops"] = float(flops) / float(batch_size)
-                if flops == 0:
-                    print("[efficiency][WARN] torch.profiler returned 0 FLOPs. Some operators may be unsupported.")
-            except Exception as exc:
-                stats["flops"] = 0.0
-                print(f"[efficiency][WARN] failed to profile FLOPs: {exc}")
-        return pred
-
-    def _log_efficiency(self, split: str) -> None:
-        if not self.eval_efficiency or getattr(self.trainer, "sanity_checking", False):
-            return
-        stats = self._efficiency_stats.get(split, {})
-        samples = int(stats.get("samples") or 0)
-        if samples <= 0:
-            return
-        rt = float(stats.get("elapsed") or 0.0) / float(samples)
-        params_m = self._inference_params_m()
-        flops_g = float(stats.get("flops") or 0.0) / 1e9
-        nfe = int(stats.get("nfe") or 0)
-        batches = max(int(stats.get("batches") or 0), 1)
-        self.log(f"{split}/RT(s)", torch.tensor(rt, device=self.device), sync_dist=True, add_dataloader_idx=False)
-        self.log(f"{split}/Params(M)", torch.tensor(params_m, device=self.device), sync_dist=True, add_dataloader_idx=False)
-        self.log(f"{split}/NFE", torch.tensor(float(nfe), device=self.device), sync_dist=True, add_dataloader_idx=False)
-        self.log(f"{split}/NFE_per_batch", torch.tensor(float(nfe) / float(batches), device=self.device), sync_dist=True, add_dataloader_idx=False)
-        self.log(f"{split}/NFE_per_sample", torch.tensor(float(nfe) / float(samples), device=self.device), sync_dist=True, add_dataloader_idx=False)
-        if flops_g > 0.0:
-            self.log(f"{split}/FLOPs(G)", torch.tensor(flops_g, device=self.device), sync_dist=True, add_dataloader_idx=False)
-        print(f"[efficiency] {split}/FLOPs(G)={flops_g:.4f}, {split}/Params(M)={params_m:.4f}, {split}/RT(s)={rt:.6f}, samples={samples}, NFE={nfe}, NFE/batch={float(nfe)/float(batches):.4f}, NFE/sample={float(nfe)/float(samples):.4f}")
-
-    def validation_step(self, batch, batch_idx):
-        rgb, thermal, dataset_idx = batch[:3]
-        target = thermal_to_01(thermal)
-        pred = self._generate_with_efficiency("val", rgb, dataset_idx)
-        self.log("val/PSNR", _psnr(pred, target).mean(), sync_dist=True, add_dataloader_idx=False)
-        self.log("val/SSIM", ssim_per_sample(pred, target).mean(), sync_dist=True, add_dataloader_idx=False)
-        if self.eval_lpips is not None:
-            self.log(
-                "val/LPIPS",
-                self.eval_lpips(_repeat_to_three(pred * 2.0 - 1.0), _repeat_to_three(target * 2.0 - 1.0)).mean(),
-                sync_dist=True,
-                add_dataloader_idx=False,
-            )
-        _update_fid_metric(self.val_fid, pred, target)
-        error = (pred - target).abs()
-        return {
-            "RGB": _rgb_to_01(rgb),
-            "GT": target,
-            "pred": pred,
-            "error": error,
-            "compare": torch.cat([target, pred, error], dim=-1),
-        }
-
-    def test_step(self, batch, batch_idx):
-        rgb, thermal, dataset_idx = batch[:3]
-        target = thermal_to_01(thermal)
-        pred = self._generate_with_efficiency("test", rgb, dataset_idx)
-        self.log("test/PSNR", _psnr(pred, target).mean(), sync_dist=True, add_dataloader_idx=False)
-        self.log("test/SSIM", ssim_per_sample(pred, target).mean(), sync_dist=True, add_dataloader_idx=False)
-        if self.eval_lpips is not None:
-            self.log(
-                "test/LPIPS",
-                self.eval_lpips(_repeat_to_three(pred * 2.0 - 1.0), _repeat_to_three(target * 2.0 - 1.0)).mean(),
-                sync_dist=True,
-                add_dataloader_idx=False,
-            )
-        _update_fid_metric(self.test_fid, pred, target)
-        error = (pred - target).abs()
-        return {
-            "RGB": _rgb_to_01(rgb),
-            "GT": target,
-            "pred": pred,
-            "error": error,
-            "compare": torch.cat([target, pred, error], dim=-1),
-        }
-
-    def on_validation_epoch_start(self) -> None:
-        self._reset_efficiency("val")
-
-    def on_validation_epoch_end(self) -> None:
-        self._log_efficiency("val")
-        _log_and_reset_fid(self, self.val_fid, "val/FID")
-
-    def on_test_epoch_start(self) -> None:
-        self._reset_efficiency("test")
-
-    def on_test_epoch_end(self) -> None:
-        self._log_efficiency("test")
-        _log_and_reset_fid(self, self.test_fid, "test/FID")
-
-
 def load_yaml(path: str | Path) -> dict[str, Any]:
     with open(path, "r", encoding="utf-8") as handle:
         return yaml.safe_load(handle)
@@ -900,7 +636,7 @@ def main() -> None:
     configure_training_runtime(dict(config.get("training", {})))
     route = validate_route(config.get("route") or config.get("model", {}).get("route") or config.get("model", {}).get("model_arch"))
     data = build_data_module(config)
-    module = PSLFlowLightningModule(config) if route == "psl_flow" else KLVaeSiTLightningModule(config)
+    module = PSLFlowLightningModule(config)
     trainer, callbacks = _trainer_from_args(config, args, with_checkpoints=args.mode == "fit")
     if args.mode == "fit":
         trainer.fit(module, datamodule=data, ckpt_path=args.resume_from)

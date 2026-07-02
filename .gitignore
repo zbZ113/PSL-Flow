@@ -18,3 +18,10 @@ wandb/
 *.pt
 *.tar
 *.csv
+
+# Local-only experiments and private validation helpers.
+/_local_private/
+/tests/
+/psl_flow/configs/experiments/klvae_sit/
+/shell/experiments/train/klvae_sit/
+/shell/experiments/test/klvae_sit/

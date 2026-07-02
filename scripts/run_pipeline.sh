@@ -34,7 +34,7 @@ case "${DATASET_NAME}" in
 esac
 
 case "${ROUTE}" in
-  psl_flow|klvae_sit) ;;
+  psl_flow) ;;
   *)
     echo "[ERR] Unsupported route: ${ROUTE}" >&2
     exit 2
@@ -107,10 +107,6 @@ case "${DATASET_NAME}:${ROUTE}" in
   CART:psl_flow) DEFAULT_SIT_STEP_1=35000; DEFAULT_SIT_STEP_2=65000 ;;
   DroneVehicle_day:psl_flow) DEFAULT_SIT_STEP_1=70000; DEFAULT_SIT_STEP_2=100000 ;;
   DroneVehicle_night:psl_flow) DEFAULT_SIT_STEP_1=90000; DEFAULT_SIT_STEP_2=120000 ;;
-  AVIID:klvae_sit) DEFAULT_SIT_STEP_1=45000; DEFAULT_SIT_STEP_2=45000 ;;
-  CART:klvae_sit) DEFAULT_SIT_STEP_1=35000; DEFAULT_SIT_STEP_2=35000 ;;
-  DroneVehicle_day:klvae_sit) DEFAULT_SIT_STEP_1=70000; DEFAULT_SIT_STEP_2=70000 ;;
-  DroneVehicle_night:klvae_sit) DEFAULT_SIT_STEP_1=90000; DEFAULT_SIT_STEP_2=90000 ;;
 esac
 SIT_STEP_UNIT="${SIT_STEP_UNIT:-steps}"
 SIT_STEP_1_RAW="${SIT_STEP_1:-${DEFAULT_SIT_STEP_1}}"
@@ -124,8 +120,6 @@ SIT_EVAL_SPLIT="${SIT_EVAL_SPLIT:-val}"
 RGB_VAE_PATH="${RGB_VAE_PATH:-}"
 RGB_VAE_REPO="${RGB_VAE_REPO:-stabilityai/sd-vae-ft-ema}"
 RGB_VAE_LOCAL_FILES_ONLY="${RGB_VAE_LOCAL_FILES_ONLY:-false}"
-THERMAL_KLVAE_CKPT="${THERMAL_KLVAE_CKPT:-}"
-THERMAL_KLVAE_NORMALIZER="${THERMAL_KLVAE_NORMALIZER:-1.0}"
 
 dataset_required_splits() {
   case "${DATASET_NAME}" in
@@ -938,7 +932,7 @@ PY
 
 patch_cfg_common() {
   local base="$1" out="$2" dataset="$3" teacher_ckpt="$4" psl_vae_ckpt="$5" samples_per_epoch="$6" route="$7"
-  python - "${base}" "${out}" "${dataset}" "${teacher_ckpt}" "${psl_vae_ckpt}" "${RGB_VAE_PATH}" "${RGB_VAE_REPO}" "${RGB_VAE_LOCAL_FILES_ONLY}" "${TRAIN_BATCH_SIZE_DEFAULT}" "${TEST_BATCH_SIZE_DEFAULT}" "${NUM_WORKERS_DEFAULT}" "${samples_per_epoch}" "${MIXED_PRECISION}" "${route}" "${THERMAL_KLVAE_CKPT}" "${THERMAL_KLVAE_NORMALIZER}" <<'PY'
+  python - "${base}" "${out}" "${dataset}" "${teacher_ckpt}" "${psl_vae_ckpt}" "${RGB_VAE_PATH}" "${RGB_VAE_REPO}" "${RGB_VAE_LOCAL_FILES_ONLY}" "${TRAIN_BATCH_SIZE_DEFAULT}" "${TEST_BATCH_SIZE_DEFAULT}" "${NUM_WORKERS_DEFAULT}" "${samples_per_epoch}" "${MIXED_PRECISION}" "${route}" <<'PY'
 import sys
 import yaml
 import os
@@ -957,9 +951,7 @@ import os
     workers,
     samples,
     mixed,
-    route,
-    thermal_klvae_ckpt,
-    thermal_klvae_normalizer,
+    route
 ) = sys.argv[1:]
 with open(base, "r", encoding="utf-8") as handle:
     cfg = yaml.safe_load(handle)
@@ -971,7 +963,7 @@ def ensure_dict(parent, key):
         parent[key] = value
     return value
 
-cfg["route"] = route if route in {"psl_flow", "klvae_sit"} else cfg.get("route")
+cfg["route"] = "psl_flow"
 datasets = ensure_dict(cfg, "datasets")
 datasets["datasets_folder"] = os.environ.get("DATASETS_PREPROCESS_ROOT", datasets.get("datasets_folder", "./datasets_preprocess"))
 datasets["train_datasets"] = [dataset]
@@ -992,8 +984,7 @@ if teacher_ckpt:
 if psl_vae_ckpt:
     model_cfg["psl_vae_ckpt"] = psl_vae_ckpt
 uses_rgb_vae = bool(
-    route == "klvae_sit"
-    or "rgb_vae_config" in model_cfg
+    "rgb_vae_config" in model_cfg
     or "rgb_vae_repo" in model_cfg
     or "rgb_vae_path" in model_cfg
 )
@@ -1003,10 +994,6 @@ if uses_rgb_vae:
     if rgb_repo:
         model_cfg["rgb_vae_repo"] = rgb_repo
     model_cfg["rgb_vae_local_files_only"] = str(rgb_local_only).lower() in {"1", "true", "yes", "y", "on"}
-if route == "klvae_sit":
-    if thermal_klvae_ckpt:
-        model_cfg["thermal_vae_ckpt"] = thermal_klvae_ckpt
-    model_cfg["thermal_normalizer"] = float(thermal_klvae_normalizer)
 with open(out, "w", encoding="utf-8") as handle:
     yaml.safe_dump(cfg, handle, sort_keys=False)
 PY
@@ -1090,8 +1077,7 @@ log_msg "Benchmark root: ${BENCH_ROOT}"
 log_msg "RGB VAE condition encoder path: ${RGB_VAE_PATH}"
 
 BASE_DIR="psl_flow/configs/experiments"
-if [[ "${ROUTE}" == "psl_flow" ]]; then
-  TERB_BASE_CFG="${BASE_DIR}/terb/${DATASET_NAME}.yml"
+TERB_BASE_CFG="${BASE_DIR}/terb/${DATASET_NAME}.yml"
   PSLVAE_BASE_CFG="${BASE_DIR}/psl_vae/${DATASET_NAME}.yml"
   FLOW_BASE_CFG="${BASE_DIR}/psl_flow/${DATASET_NAME}.yml"
   PIPE_ROOT="${ARTIFACT_ROOT}/psl_flow"
@@ -1206,18 +1192,7 @@ if [[ "${ROUTE}" == "psl_flow" ]]; then
         --seed "${NORMALIZER_SEED}"
   fi
   assert_file "${FLOW_STATS_JSON}" "PSL-VAE latent stats"
-else
-  FLOW_BASE_CFG="${BASE_DIR}/klvae_sit/${DATASET_NAME}.yml"
-  PIPE_ROOT="${ARTIFACT_ROOT}/klvae_sit"
-  FLOW_RUN="${PIPE_ROOT}/sit_steps${SIT_STEP_2}"
-  FLOW_CFG="${ARTIFACT_ROOT}/configs/klvae_sit_${DATASET_NAME}.yml"
-  if [[ -z "${THERMAL_KLVAE_CKPT}" ]]; then
-    log_msg "ERR route=klvae_sit requires THERMAL_KLVAE_CKPT=/path/to/thermal_klvae.ckpt"
-    exit 1
-  fi
-  patch_cfg_common "${FLOW_BASE_CFG}" "${FLOW_CFG}" "${DATASET_NAME}" "" "" "${FLOW_NUM_SAMPLES_PER_EPOCH}" "klvae_sit"
-  patch_training_strategy "${FLOW_CFG}" "" "0" "${FLOW_VAL_EVERY_STEPS}" "${FLOW_CHECKPOINT_MONITOR}" "min" ""
-fi
+
 
 printf -v FLOW_STEP1 "%s/checkpoints/step_%06d.ckpt" "${FLOW_RUN}" "${SIT_STEP_1}"
 printf -v FLOW_STEP2 "%s/checkpoints/step_%06d.ckpt" "${FLOW_RUN}" "${SIT_STEP_2}"
