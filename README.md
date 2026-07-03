@@ -1,6 +1,6 @@
 # PSL-Flow
 
-Official implementation of **PSL-Flow: Physics-Structured Latent Flow Matching for Aerial Visible-to-Infrared Image Translation**.
+Implementation of **PSL-Flow: Physics-Structured Latent Flow Matching for Aerial Visible-to-Infrared Image Translation**.
 
 ![Overall architecture of PSL-Flow](Overall%20architecture%20of%20PSL-Flow.svg)
 
