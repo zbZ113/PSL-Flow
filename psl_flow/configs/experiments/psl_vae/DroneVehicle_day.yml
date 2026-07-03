@@ -59,7 +59,7 @@ training:
         lambda_env_init: 0.1
       lambda_f: 1.0
       lambda_phys: 1.0
-      lambda_perc: 0.25
+      lambda_perc: 0.5
       lambda_kl: 1.0e-6
   mixed_precision: false
   gradient_accumulation: 1

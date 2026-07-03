@@ -22,7 +22,7 @@ def _repeat_to_three(x: torch.Tensor) -> torch.Tensor:
 class PSLVAELossConfig:
     lambda_f: float = 1.0
     lambda_phys: float = 1.0
-    lambda_perc: float = 0.25
+    lambda_perc: float = 0.5
     lambda_kl: float = 1e-6
 
     @classmethod
