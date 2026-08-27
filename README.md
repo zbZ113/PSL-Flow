@@ -144,9 +144,11 @@ logs/experiments/<dataset>/psl_flow/<run_id>/artifacts/metrics/
 
 ```bibtex
 @article{lin_pslflow,
-  title = {PSL-Flow: Physics-Structured Latent Flow Matching for Aerial Visible-to-Infrared Image Translation},
-  author = {Lin, Leping and Zheng, Zibin and Ouyang, Ning},
-  note = {Manuscript},
+  title   = {PSL-Flow: Physics-Structured Latent Flow Matching for Aerial Visible-to-Infrared Image Translation},
+  author  = {Lin, Leping and Zheng, Zibin and Ouyang, Ning},
+  journal = {IEEE Geoscience and Remote Sensing Letters},
+  year    = {2026},
+  doi     = {10.1109/LGRS.2026.3726472},
 }
 ```
 
